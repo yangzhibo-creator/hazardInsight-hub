@@ -1,0 +1,36 @@
+{
+  "model_id": "bge-large-zh-v1.5",
+  "provider": "sentence_transformer",
+  "source": "D:\\codes\\yan-shi\\hazardInsight-hub\\backend\\python\\cluster-engine\\models\\bge-large-zh-v1.5",
+  "dimension": 1024,
+  "pooling": "cls",
+  "normalize": false,
+  "device": "cpu",
+  "batch_size": 64,
+  "max_length": 512,
+  "revision": "local-main",
+  "file_checksums": {
+    "1_Pooling/config.json": "e54c164a07274f2eb45bb724f54a79d1efcc90c41573887cd9a29aeee0597352",
+    "config.json": "2d4f53504b43a856f982dad647835c0ae98f91a73c8ff0db95ab89e3e4806fa9",
+    "config_sentence_transformers.json": "940d5f50db195fa6e5e6a4f122c095f77880de259d74b14a65779ed48bdd7c56",
+    "modules.json": "84e40c8e006c9b1d6c122e02cba9b02458120b5fb0c87b746c41e0207cf642cf",
+    "pytorch_model.bin": "bf84a56fb045c24e090495195584a3922c3e4204107f0bba8b79c11f67a207f2",
+    "sentence_bert_config.json": "84e39fda68ccbff05bfa723ae9c0e70e23e2ec373b76e0f8c6e71af72a693cbf",
+    "special_tokens_map.json": "b6d346be366a7d1d48332dbc9fdf3bf8960b5d879522b7799ddba59e76237ee3",
+    "tokenizer.json": "7dfbf1966ebf99d471c3796e9b457329d2b2182b817e144f1e904b957745c839",
+    "tokenizer_config.json": "e1790949631401af1bfb6c9c7aeec7fcf612e274d73579d99f704faea40c8ba7",
+    "vocab.txt": "45bbac6b341c319adc98a532532882e91a9cefc0329aa57bac9ae761c27b291c"
+  },
+  "required_files": [
+    "1_Pooling/config.json",
+    "config.json",
+    "config_sentence_transformers.json",
+    "modules.json",
+    "pytorch_model.bin",
+    "sentence_bert_config.json",
+    "special_tokens_map.json",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "vocab.txt"
+  ]
+}

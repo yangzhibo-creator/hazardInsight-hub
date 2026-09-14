@@ -1,9 +1,8 @@
 /**
  * 历史测试记录（点击就地展开）。
  *
- * 数据来源是**异步作业历史**（`GET /api/clustering/jobs`）：每次「提交后台作业」
- * 都会在服务端留下一条记录，这是唯一真正带时间线、能列出"过去跑过哪些测试"的来源。
- * 离线基准归档是单份论文复现数据、没有历史，仍由「离线基准结果」卡片单独展示。
+ * 数据来源是**服务端保存的聚类作业记录**（`GET /api/clustering/jobs`）：
+ * 每次聚类都会在服务端留下一条记录，这是唯一真正带时间线、能列出"过去跑过哪些分析"的来源。
  *
  * 交互上刻意**不用抽屉、不跳页**：点一行就在列表内展开该作业的结果摘要、簇概览与
  * 分页明细，再点一次收起。作业状态是历史的一部分，失败 / 取消 / 仍在执行都必须
@@ -98,8 +97,8 @@ export function ClusteringJobHistory() {
         </button>
       </div>
       <p className="small muted">
-        这里列出服务端保存的历史聚类作业（新→旧，最多 {HISTORY_LIST_LIMIT} 条），点击任意一条
-        <strong>就地展开</strong>结果摘要与明细，再点一次收起。与离线基准归档不同，这些是真实跑过的作业记录。
+        这里列出服务端保存的历史聚类记录（新→旧，最多 {HISTORY_LIST_LIMIT} 条），点击任意一条
+        <strong>就地展开</strong>结果摘要与明细，再点一次收起。每条都是真实跑过的分析记录。
       </p>
 
       {error && <p className="clustering-notice is-error">历史记录加载失败：{error}</p>}
@@ -110,7 +109,7 @@ export function ClusteringJobHistory() {
       )}
       {!busy && !error && jobs.length === 0 && (
         <p className="small muted">
-          还没有历史测试记录。在页面上方的「提交后台作业」跑一次后，这里就会出现可回看的记录。
+          还没有历史记录。完成一次聚类后，这里就会出现可回看的记录。
         </p>
       )}
 
@@ -305,7 +304,7 @@ function JobHistoryDetail({
             <p key={warning} className="clustering-notice">{warning}</p>
           ))}
 
-          {/* 基准指标：算出来的走实测，没有指标的整份测试集运行回退到论文归档 */}
+          {/* 基准指标：算出来的走实测，没有指标的整份测试集运行回退到参考结果 */}
           <JobBenchmark job={job} summary={result.summary} />
 
           <div className="clustering-history-clusters">
@@ -388,17 +387,17 @@ function JobHistoryDetail({
  *
  * 三种来源必须泾渭分明：
  * 1. 本次算出（`summary.metrics`）—— 主运行 +（可选）净化关对照 + 差值；
- * 2. 本次没算、但作业是整份测试集口径 —— 回退到论文归档，并**明说不是实测**；
+ * 2. 本次没算、但作业是整份测试集口径 —— 回退到基准结果，并**明说不是本次实测**；
  * 3. 本次没算、也不是全量 —— 说明原因（数据集缺类别标签），不硬凑数字。
  */
 function JobBenchmark({ job, summary }: { job: ClusteringJobInfo; summary: ClusteringSummary }) {
   const computed = hasComputedMetrics(summary);
   const [baseline, setBaseline] = useState<ClusteringOfflineBaseline | null>(null);
   const [baselineError, setBaselineError] = useState('');
-  /** 归档读取失败后的重试计数。 */
+  /** 基准结果读取失败后的重试计数。 */
   const [retry, setRetry] = useState(0);
 
-  // 只有没算出指标时才需要归档：算出来的实测值永远优先于归档值
+  // 只有没算出指标时才需要基准结果：算出来的实测值永远优先
   useEffect(() => {
     if (computed) return;
     let cancelled = false;
@@ -450,13 +449,12 @@ function JobBenchmark({ job, summary }: { job: ClusteringJobInfo; summary: Clust
         </div>
         {withControl && (
           <p className="small muted">
-            主运行与对照仅差「净化开关」，其余选项完全一致；差值方向为「主运行 − 对照」，
-            与离线基准里「完整框架 − nr0 基线」同向。
+            主运行与对照仅差「净化开关」，其余选项完全一致；差值方向为「主运行 − 对照」。
           </p>
         )}
         {summary.metrics?.score === -1 && (
           <p className="clustering-notice">
-            这次只得到一个有效簇，成对指标无法计算（后端返回哨兵值 -1），请调大样本量或更换 profile。
+            这次只得到一个有效簇，成对指标无法计算（后端返回哨兵值 -1），请调大样本量或更换分析配置。
           </p>
         )}
       </div>
@@ -468,8 +466,8 @@ function JobBenchmark({ job, summary }: { job: ClusteringJobInfo; summary: Clust
     return (
       <div className="clustering-benchmark">
         <div className="clustering-toolbar">
-          <h3 className="clustering-table-title">基准指标 · 论文归档</h3>
-          <span className="small muted">本作业未计算指标，下为归档对比</span>
+          <h3 className="clustering-table-title">基准指标（外部指标）</h3>
+          <span className="small muted">本作业未计算指标，下为基准结果对照</span>
         </div>
         <div className="clustering-table-scroll">
           <table className="table clustering-table">
@@ -502,9 +500,6 @@ function JobBenchmark({ job, summary }: { job: ClusteringJobInfo; summary: Clust
             </tbody>
           </table>
         </div>
-        {baseline.notes && baseline.notes.length > 0 && (
-          <p className="small muted">{baseline.notes[baseline.notes.length - 1]}</p>
-        )}
       </div>
     );
   }
@@ -515,8 +510,8 @@ function JobBenchmark({ job, summary }: { job: ClusteringJobInfo; summary: Clust
         <h3 className="clustering-table-title">基准指标（外部指标）</h3>
       </div>
       {baselineError && (
-        <p className="clustering-notice is-error">
-          基准归档读取失败：{baselineError}
+        <p className="clustering-notice">
+          基准结果暂不可用。
           <button className="btn btn-outline btn-sm" onClick={() => setRetry((value) => value + 1)}>
             <IconRefresh size={14} />重试
           </button>

@@ -102,10 +102,10 @@ export const fetchClusteringAlgorithms = () =>
 export const fetchClusteringSample = () => request<ClusteringSampleData>('/sample');
 
 /**
- * 读取离线基准结果。
+ * 读取基准结果（各分析配置在全量测试集上的参考指标）。
  *
- * 这是现场演示的兜底入口：实时计算失败或时间不够时，直接展示已归档的
- * 指标（并如实标注出处与是否全量口径），避免"演示中断"。
+ * 页面进入后自动调用一次；随响应返回的出处与口径（`source` / `verifiedAt` /
+ * `fullRun`）由界面原样展示，与本次运行分开呈现。
  */
 export const fetchClusteringBaseline = () => request<ClusteringOfflineBaseline>('/baseline');
 

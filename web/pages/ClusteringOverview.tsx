@@ -1,5 +1,5 @@
 /**
- * 聚类展示（演示/汇报视角）。
+ * 隐患聚类分析（聚类展示）。
  *
  * 目标：一键跑通真实聚类，并把结果以「散点图 + 簇卡片 + 明细表」三层结构呈现。
  * 计算全部由 Python 聚类服务完成（算法来自 cluster-engine），本页只负责
@@ -14,7 +14,6 @@ import type {
   ClusteringJobSubmitOptions,
   ClusteringKnowledgeBaseInfo,
   ClusteringOfflineBaseline,
-  ClusteringResultItem,
 } from '../../shared/clustering';
 import {
   fetchClusteringBaseline,
@@ -26,16 +25,14 @@ import {
 import { ClusterFilterBar } from '../components/ClusterFilterBar';
 import { ClusterItemDetail } from '../components/ClusterItemDetail';
 import { ClusterScatter } from '../components/ClusterScatter';
-import { ClusteringJobPanel, isCancellable } from '../components/ClusteringJobPanel';
 import { ClusteringJobHistory } from '../components/ClusteringJobHistory';
 import { KnowledgeBasePicker, knowledgeBaseName } from '../components/KnowledgeBasePicker';
 import { FilterHeader, KeywordCells, KeywordSearch, OptionList, SortHeader } from '../components/TableControls';
-import { IconLayers, IconPlay, IconRefresh, IconServer, IconUpload } from '../components/icons';
+import { IconLayers, IconPlay, IconRefresh, IconUpload } from '../components/icons';
 import { clusterColor, clusterTint } from '../lib/clusterColor';
 import { logDebugWarnings, splitClusteringWarnings } from '../lib/clusteringWarnings';
-import { detectLabelField } from '../lib/clusteringMetrics';
+import { archivedColumnLabel, detectLabelField } from '../lib/clusteringMetrics';
 import { useClusterEngine } from '../lib/useClusterEngine';
-import { useClusteringJob } from '../lib/useClusteringJob';
 import { useTableQuery } from '../lib/useTableQuery';
 import './Clustering.css';
 
@@ -45,17 +42,12 @@ interface LoadedDataset {
   name: string;
   items: ClusteringDatasetItem[];
   warnings: string[];
-  /** 后端保存的数据集引用；有它时提交作业只需传这个 ID，不必重传样本。 */
+  /** 后端保存的数据集引用（上传接口随预览一并返回）。 */
   datasetId?: string | null;
 }
 
 export function ClusteringOverview() {
   const engine = useClusterEngine();
-  /**
-   * 异步作业状态机由页面持有：提交按钮要和「开始聚类」并排放在运行选项里，
-   * 面板只负责"作业跑起来之后"的进度、取消与分页明细。
-   */
-  const jobApi = useClusteringJob();
   const [dataset, setDataset] = useState<LoadedDataset | null>(null);
   const [datasetBusy, setDatasetBusy] = useState(false);
   const [datasetError, setDatasetError] = useState('');
@@ -72,7 +64,7 @@ export function ClusteringOverview() {
   const [purifyMode, setPurifyMode] = useState<'profile' | 'on' | 'off'>('profile');
   /**
    * 「同时跑未净化对照」：勾选后同一次提交会额外跑一遍净化关，配合数据集自带的
-   * 类别标签算出 6 项外部指标与差值（论文里 nr0 vs 完整框架的口径）。
+   * 类别标签算出 6 项外部指标与差值。
    * 只在所选 profile 有净化能力时才有意义。
    */
   const [controlPurify, setControlPurify] = useState(false);
@@ -83,7 +75,6 @@ export function ClusteringOverview() {
   const [knowledgeBases, setKnowledgeBases] = useState<ClusteringKnowledgeBaseInfo[]>([]);
   const [knowledgeBaseId, setKnowledgeBaseId] = useState('');
   const [baseline, setBaseline] = useState<ClusteringOfflineBaseline | null>(null);
-  const [baselineBusy, setBaselineBusy] = useState(false);
   const [baselineError, setBaselineError] = useState('');
   const [activeClusterId, setActiveClusterId] = useState<number | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -208,18 +199,9 @@ export function ClusteringOverview() {
   const purifyOverride = purifyMode === 'profile' ? undefined : purifyMode === 'on';
   const knowledgeBaseOverride = knowledgeBaseId || undefined;
 
-  /** 面板/结果展示用的参考数据库名称（显式选择 > profile 默认；都没有则为空）。 */
-  const knowledgeBaseLabel = knowledgeBaseId
-    ? knowledgeBaseName(knowledgeBases, knowledgeBaseId)
-    : knowledgeBaseName(knowledgeBases, selectedProfile?.knowledgeBaseId);
-
   const canRun = Boolean(dataset && dataset.items.length >= minItems) && !running && !datasetBusy;
 
-  /**
-   * 同步与异步共用的执行选项。
-   * 两条入口读同一份选项对象，才不会出现"同步用的库和异步用的库不是同一个"
-   * 这类无法解释的差异。
-   */
+  /** 本次运行的执行选项：算法 / 分析配置 / 二维坐标 / 净化 / 参考数据库。 */
   const runOptions = useMemo<ClusteringJobSubmitOptions>(
     () => ({
       algorithm: algorithm || undefined,
@@ -234,31 +216,25 @@ export function ClusteringOverview() {
     [algorithm, profileId, visualize, purifyOverride, knowledgeBaseOverride, controlPurify],
   );
 
-  /** 提交后台作业：与「开始聚类」并排，样本大时走这条（提交即返回、可取消、明细分页）。 */
-  const submitJob = useCallback(() => {
-    if (!dataset || dataset.items.length < minItems) {
-      setRunError(`至少需要 ${minItems} 条样本才能提交后台作业。`);
-      return;
-    }
-    setRunError('');
-    void jobApi.submit(
-      dataset.items,
-      dataset.datasetId ? { ...runOptions, datasetId: dataset.datasetId } : runOptions,
-    );
-  }, [dataset, minItems, jobApi, runOptions]);
-
-  /** 加载离线基准结果：实时计算失败或时间不够时的兜底入口。 */
+  /**
+   * 基准结果：页面进入后自动读取，不设手动加载入口。
+   *
+   * 失败时只回一句中性文案——后端的原始报错里带有实现口径，不适合直接摆到界面上。
+   */
   const loadBaseline = useCallback(async () => {
-    setBaselineBusy(true);
     setBaselineError('');
     try {
       setBaseline(await fetchClusteringBaseline());
-    } catch (cause) {
-      setBaselineError((cause as Error).message);
-    } finally {
-      setBaselineBusy(false);
+    } catch {
+      setBaselineError('unavailable');
     }
   }, []);
+
+  // 引擎就绪后再取基准结果：服务没起来时不必再报一次错（顶部已有专门的提示条）。
+  useEffect(() => {
+    if (!engine.ready) return;
+    void loadBaseline();
+  }, [engine.ready, loadBaseline]);
 
   const start = useCallback(async () => {
     if (!dataset || dataset.items.length < minItems) {
@@ -312,6 +288,21 @@ export function ClusteringOverview() {
   const executedProfile =
     engine.profiles.find((profile) => profile.profileId === summary?.profileId) ?? null;
 
+  /**
+   * 基准表要展示的行。
+   *
+   * 只列本系统的分析配置：把 `nr0_legacy` 这类键翻成人话列出来；
+   * 认不出的键（外部报告口径，非同机实测）不进这张对照表，
+   * 与 `clusteringMetrics.archivedColumnLabel` 的口径保持一致。
+   */
+  const baselineRows = useMemo(
+    () =>
+      Object.entries(baseline?.rows ?? {})
+        .filter(([key]) => archivedColumnLabel(key) !== key)
+        .map(([key, metrics]) => ({ key, label: archivedColumnLabel(key), metrics })),
+    [baseline],
+  );
+
   /** 明细表副标题：按筛选与高亮状态给出人话描述。 */
   const scopeText = (() => {
     if (table.rowClusterFilter.length) {
@@ -328,9 +319,9 @@ export function ClusteringOverview() {
   return (
     <div className="page clustering-page">
       <div className="page-head">
-        <h1>聚类分析 · 聚类展示</h1>
+        <h1>隐患聚类分析</h1>
         <div className="sub">
-          对核电工程隐患文本执行无监督聚类，查看簇结构、代表样本与关键词。算法由本地 Python 聚类服务提供。
+          对核电工程隐患文本自动聚类，查看隐患簇结构、代表样本与关键词。算法与向量模型由本地聚类服务提供。
         </div>
       </div>
 
@@ -399,14 +390,14 @@ export function ClusteringOverview() {
             </select>
           </label>
           <label>
-            配置档 Profile
+            分析配置
             <select
               className="select"
               value={profileId}
               disabled={running || !engine.ready}
               onChange={(event) => setProfileId(event.target.value)}
             >
-              <option value="">自动选择</option>
+              <option value="">自动选择（推荐）</option>
               {selectableProfiles.map((profile) => (
                 <option key={profile.profileId} value={profile.profileId}>
                   {profile.profileId}（{profile.algorithm}
@@ -421,8 +412,8 @@ export function ClusteringOverview() {
             计算二维散点坐标（PCA，仅用于展示）
           </label>
           {/*
-            净化开关只在所选 profile 属于 spear-v1 时出现。`profile` 是默认值：
-            现场正常演示按 profile 口径执行，只有做对照实验才手动覆盖。
+            净化开关只在所选配置带净化能力时出现。默认「按所选配置」：
+            正常使用按配置自身的口径执行，只有做对照实验才手动覆盖。
           */}
           {purificationSupported && (
             <label>
@@ -433,7 +424,7 @@ export function ClusteringOverview() {
                 disabled={running}
                 onChange={(event) => setPurifyMode(event.target.value as 'profile' | 'on' | 'off')}
               >
-                <option value="profile">按 profile（推荐）</option>
+                <option value="profile">按所选配置（推荐）</option>
                 <option value="on">强制开启</option>
                 <option value="off">关闭（对照组）</option>
               </select>
@@ -458,13 +449,13 @@ export function ClusteringOverview() {
             </label>
           )}
           {/*
-            参考数据库选择器始终渲染（见 KnowledgeBasePicker）：纯向量 profile 下
+            参考数据库选择器始终渲染（见 KnowledgeBasePicker）：纯向量配置下
             禁用并说明原因，比整块消失更容易理解——"为什么不能选参考数据库"本身就是
-            一个必须被回答的问题。默认值是该 profile 清单里的默认库。
+            一个必须被回答的问题。默认值是该配置清单里的默认库。
           */}
           <span className="small muted">
             {engine.health
-              ? `引擎已加载 ${engine.health.engine.profilesTotal} 个 profile，其中 ${engine.health.engine.profilesAvailable} 个可执行`
+              ? `共 ${engine.health.engine.profilesTotal} 种分析配置，${engine.health.engine.profilesAvailable} 种当前可用`
               : engine.loading ? '正在检查聚类服务…' : '聚类服务不可用'}
           </span>
         </div>
@@ -477,32 +468,15 @@ export function ClusteringOverview() {
           disabled={running}
         />
 
-        {/*
-          执行入口只有这一处：同步与异步并排，选项就在正上方。
-          以前异步提交藏在页面底部（离线基准之后），"选完参数还要满页找按钮"，
-          这不是设计取舍，是两次迭代叠加出来的偶然结果——现在纠正掉。
-        */}
+        {/* 执行入口：选项就在正上方，选完即可直接运行。 */}
         <div className="clustering-actions">
           <button
             className="btn btn-primary"
             disabled={!canRun || !engine.ready}
             onClick={() => void start()}
-            title="同步执行：小样本即点即看，结果直接回传"
+            title="立即执行本次聚类，结果直接回传"
           >
             <IconPlay size={15} />{running ? '聚类进行中…' : '开始聚类'}
-          </button>
-          <button
-            className="btn btn-outline"
-            disabled={!canRun || !engine.ready || jobApi.busy || isCancellable(jobApi.job)}
-            onClick={submitJob}
-            title="异步作业：立刻返回作业 ID，可取消、可刷新，明细按页读取"
-          >
-            <IconServer size={15} />
-            {isCancellable(jobApi.job)
-              ? '后台作业执行中…'
-              : jobApi.busy
-                ? '提交中…'
-                : '提交后台作业'}
           </button>
         </div>
 
@@ -514,8 +488,7 @@ export function ClusteringOverview() {
         )}
         {controlPurify && labelField && (
           <p className="small muted">
-            将用「{labelField}」作为真值计算 ARI / VM / FMS / AMI / HS / CS，并额外跑一遍净化关对照
-            （耗时约翻倍）；结果会显示在下方「历史测试记录」对应作业的展开区。
+            将用「{labelField}」作为真值计算 ARI / VM / FMS / AMI / HS / CS，并额外跑一遍净化关对照（耗时约翻倍）。
           </p>
         )}
 
@@ -525,38 +498,18 @@ export function ClusteringOverview() {
       </section>
 
       {/*
-        后台作业的进度与结果。提交按钮已经并到上面的运行选项行，这里只在
-        「有作业可看」时出现——不再是一张永远挂在页面中间的空卡片。
+        基准结果：页面进入即自动读取，不设手动加载入口。
+        指标取自全量测试集的一次完整运行，与本次运行是两回事——出处与口径
+        原样展示在表头上方，不与本次运行的统计混排。
       */}
-      <ClusteringJobPanel
-        api={jobApi}
-        items={dataset?.items ?? []}
-        datasetId={dataset?.datasetId ?? null}
-        /* 与同步「开始聚类」同一份选项：参考数据库对异步作业同样生效。 */
-        options={runOptions}
-        knowledgeBaseLabel={knowledgeBaseLabel}
-        disabled={!engine.ready || datasetBusy}
-        /* 提交按钮已经在上方运行选项行里，这里只展示进度与结果。 */
-        showSubmit={false}
-      />
-
-      {/*
-        离线基准结果：现场演示的兜底入口。
-        归档数字与实时结果必须区分开，因此这里把 source / verifiedAt / fullRun
-        原样展示，不做美化，也不与本次运行的统计混排。
-      */}
-      <section className="card card-pad" aria-label="离线基准结果">
+      <section className="card card-pad" aria-label="基准结果">
         <div className="clustering-section-head">
-          <h2>离线基准结果</h2>
-          <button className="btn btn-outline btn-sm" disabled={baselineBusy} onClick={() => void loadBaseline()}>
-            <IconRefresh size={14} />{baselineBusy ? '加载中…' : '加载离线基准结果'}
-          </button>
+          <h2>基准结果</h2>
+          <span className="small muted">按分析配置给出的参考指标</span>
         </div>
         <p className="small muted">
-          实时计算失败或时间不足时的兜底：直接展示已归档的论文复现指标。归档结果是全量 20,198 条口径，
-          与本次实时运行是两回事——出处与口径会显示在下方，不做混合。
+          各分析配置在全量测试集上的参考指标，可与本次运行结果相互对照。
         </p>
-        {baselineError && <p className="clustering-notice">{baselineError}</p>}
         {baseline && (
           <>
             <p className="small muted">
@@ -575,9 +528,9 @@ export function ClusteringOverview() {
                   </tr>
                 </thead>
                 <tbody>
-                  {Object.entries(baseline.rows).map(([name, metrics]) => (
-                    <tr key={name}>
-                      <td>{name}</td>
+                  {baselineRows.map(({ key, label, metrics }) => (
+                    <tr key={key}>
+                      <td>{label}</td>
                       <td>{metrics.ari ?? '—'}</td>
                       <td>{metrics.vm ?? '—'}</td>
                       <td>{metrics.nClusters ?? '—'}</td>
@@ -600,17 +553,14 @@ export function ClusteringOverview() {
                 {baseline.comparison.nClusters !== undefined && <> · 聚类数 {baseline.comparison.nClusters >= 0 ? '+' : ''}{baseline.comparison.nClusters}</>}
               </p>
             )}
-            {(baseline.notes ?? []).map((note) => (
-              <p key={note} className="small muted">{note}</p>
-            ))}
           </>
         )}
+        {/* 取不到基准结果时只说明状态；后端原始报错带有实现口径，不直接透传 */}
+        {!baseline && baselineError && <p className="small muted">基准结果暂不可用。</p>}
+        {!baseline && !baselineError && engine.ready && <p className="small muted">正在读取基准结果…</p>}
       </section>
 
-      {/*
-        历史测试记录紧挨着离线基准归档：两者都回答"过去的结果在哪"。
-        区别必须一眼可见——归档是单份论文复现数据，历史是真实跑过的作业。
-      */}
+      {/* 历史测试记录：真实跑过的作业，可回看结果摘要与明细 */}
       <ClusteringJobHistory />
 
       {summary && (
@@ -647,7 +597,7 @@ export function ClusteringOverview() {
 
           <section className="card card-pad clustering-run-meta">
             <p className="small muted">
-              运行 ID：{summary.runId} · 算法：<strong>{summary.algorithm}</strong> · Profile：{summary.profileId} ·
+              运行 ID：{summary.runId} · 算法：<strong>{summary.algorithm}</strong> · 分析配置：{summary.profileId} ·
               实现版本：{summary.implementationVersion} ·
               向量模型：{summary.modelId}（{summary.embeddingDimension} 维）·
               引擎耗时 {summary.elapsedMs} ms · 网关总耗时 {summary.gatewayMs} ms
@@ -658,7 +608,7 @@ export function ClusteringOverview() {
                 参考数据库：<strong>{knowledgeBaseName(knowledgeBases, executedProfile.knowledgeBaseId)}</strong>
                 <span className="mono"> {executedProfile.knowledgeBaseId}</span>
                 {knowledgeBaseId && knowledgeBaseId !== executedProfile.knowledgeBaseId && (
-                  <> · 所选库未生效，本次按 profile 默认库执行</>
+                  <> · 所选库未生效，本次按配置默认库执行</>
                 )}
               </p>
             )}
@@ -683,7 +633,7 @@ export function ClusteringOverview() {
               <p className="clustering-notice">
                 阈值校准：{summary.calibrationVersion}
                 {summary.calibrationStatus === 'validated' ? '（已校准）' : '（尚未经人工校准验证，结果仅供探索）'}。
-                阈值与权重不在 profile 里，如需调整请改校准配置后重新运行。
+                阈值与权重不在分析配置里，如需调整请改校准配置后重新运行。
               </p>
             )}
             {summaryWarnings.visible.map((warning) => (
@@ -697,21 +647,20 @@ export function ClusteringOverview() {
                     : '本次所有样本都被判定为噪声，说明密度类算法在当前数据上的阈值过严。'
                   : '本次只得到 1 个簇，说明当前算法的默认参数把这批文本并成了一类。'}
                 {summary.implementationVersion === 'semantic-v1'
-                  ? '可以换用其他 profile 对比，或检查文本是否本身差异过大（主题数远多于样本数时必然难以成簇）。'
+                  ? '可以换用其他分析配置对比，或检查文本是否本身差异过大（主题数远多于样本数时必然难以成簇）。'
                   : '不同算法对同一批数据的粒度差异很大，建议在「算法」下拉里换一个再试（例如 leader / birch / canopy），或到「聚类测试」页做多算法横向对比。'}
               </p>
             )}
           </section>
 
           {/*
-            净化前后对照：演示里最有说服力的一屏。
-            这里展示的是引擎真实产出的净化结果（不是前端模拟），因此同时把
-            后端、是否降级、护栏拦截条数一并显示——"用的什么净化"本身就是结论的一部分。
+            净化前后对照：这里展示的是引擎真实产出的净化结果（不是前端模拟），
+            因此把执行后端、是否降级、护栏拦截条数一并显示——"用的什么净化"本身就是结论的一部分。
           */}
           {summary.purification && (
             <section className="card card-pad" aria-label="语义净化">
               <div className="clustering-section-head">
-                <h2>阶段 1 · 语义净化</h2>
+                <h2>语义净化</h2>
                 <span className="small muted">
                   净化只做剥离与压缩，不判定缺陷类别；否定词等极性表述由确定性护栏保证不丢失。
                 </span>
@@ -730,7 +679,7 @@ export function ClusteringOverview() {
               {summary.purification.degraded && (
                 <p className="clustering-notice">
                   净化已降级为规则兜底（原因：{summary.purification.reason ?? '未知'}）。
-                  降级不影响结果可复现，但净化质量低于论文口径，演示时应如实说明。
+                  降级不影响结果可复现，但净化效果弱于正常路径。
                 </p>
               )}
               {summary.purification.samples.length ? (
@@ -768,7 +717,7 @@ export function ClusteringOverview() {
             {summary.implementationVersion === 'spear-v1' && (result?.visualization?.length ?? 0) === 0 && (
               <p className="clustering-notice">
                 spear-v1 的聚类空间来自净化后的文本，网关不复现该空间，因此本路径不生成二维坐标；
-                簇结构与逐条归属不受影响。需要散点图请用 legacy / semantic profile。
+                簇结构与逐条归属不受影响。需要散点图请换用其他分析配置。
               </p>
             )}
             <ClusterScatter

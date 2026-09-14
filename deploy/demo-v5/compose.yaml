@@ -1,0 +1,36 @@
+name: hazard-demo-v5
+services:
+  app:
+    image: nuclear-hazard-demo:demo-v5
+    pull_policy: never
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: "3001"
+      PY_CLUSTER_URL: http://clustering:8000
+    ports:
+      - "127.0.0.1:${DEMO_PORT:-3001}:3001"
+    volumes:
+      - ./data/.runtime-model.json:/app/.runtime-model.json
+      - ./data/.rules-imported.json:/app/.rules-imported.json
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3001/api/model').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    depends_on:
+      clustering:
+        condition: service_healthy
+  clustering:
+    image: nuclear-hazard-clustering:demo-v5
+    pull_policy: never
+    restart: unless-stopped
+    volumes:
+      - ./data/jobs:/app/backend/python/artifacts
+      - ./data/engine:/app/backend/python/cluster-engine/artifacts
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json,urllib.request; d=json.load(urllib.request.urlopen('http://127.0.0.1:8000/api/health',timeout=20)); assert d['status']=='ok',d"]
+      interval: 15s
+      timeout: 25s
+      retries: 30
+      start_period: 60s

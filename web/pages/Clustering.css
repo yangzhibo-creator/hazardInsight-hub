@@ -5,6 +5,10 @@
 
 .clustering-page > .card { margin-bottom: 16px; }
 
+/* 页内说明段落收紧：说明文字成组出现时不再各自留出整行外边距，
+   卡片尾部不会出现成片留白（配置卡 / 基准结果卡均受益）。 */
+.clustering-page section > p.small.muted + p.small.muted { margin-top: 8px; }
+
 /* ---------- 顶部提示条 ---------- */
 .clustering-banner { border-left: 3px solid var(--primary); }
 .clustering-banner strong { display: block; margin-bottom: 6px; color: var(--navy); font-size: 14px; }
@@ -41,6 +45,7 @@
 .clustering-head-actions { display: flex; align-items: center; gap: 8px; }
 .clustering-run-meta p { line-height: 1.9; }
 
+/* ---------- 状态标签 ---------- */
 .clustering-status {
   display: inline-flex; align-items: center; height: 22px; padding: 0 9px; border-radius: 99px;
   font-size: 11px; font-weight: 600; white-space: nowrap;
@@ -317,7 +322,8 @@
 .cluster-item-detail h4 { margin: 20px 0 8px; font-size: 13.5px; color: var(--navy); }
 .cluster-item-detail .table { font-size: 12.5px; }
 
-/* ---------- 异步作业面板 ---------- */
+/* ---------- 结果明细列表（历史记录展开区） ---------- */
+/* 面板组件本身不再挂在页面入口上，但明细列表、分页等样式仍由历史记录复用。 */
 .clustering-job-panel .clustering-toolbar { margin-bottom: 10px; }
 .clustering-job-keyword {
   min-width: 220px; padding: 7px 10px; border-radius: 8px;
