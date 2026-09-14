@@ -72,6 +72,22 @@ def profile_status(catalog, profile):
         return False, exc.code
 
 
+def purification_status(profile):
+    """净化依赖的可用性快照（无副作用，不加载权重）。
+
+    净化是**软依赖**：本地 LLM 缺失时会自动降级为规则净化，因此它不参与
+    ``available`` 判定（那会让 profile 在缺模型时整体不可用）。但降级状态必须
+    被如实下发，调用方据此决定是否接受"这次净化其实是正则做的"。
+    """
+
+    spec = getattr(profile, "purification", None)
+    if spec is None:
+        return None
+    from ..purification import probe
+
+    return probe(spec).as_dict()
+
+
 @router.get("/api/v1/profiles")
 def profiles(request: Request):
     """列出可通过 API 使用的配置档及其可用状态。"""
@@ -82,6 +98,11 @@ def profiles(request: Request):
         if profile.algorithm not in API_ALGORITHMS:
             continue
         ok, reason = profile_status(catalog, profile)
+        purification = purification_status(profile)
+        warnings = list(WARNINGS.get(profile.algorithm, []))
+        if purification and purification.get("degraded"):
+            # 降级不是错误，但必须让调用方看见
+            warnings.append("PURIFIER_DEGRADED_TO_RULE")
         # 不对外发布文件系统路径与 provider 原始配置
         result.append(
             {
@@ -96,7 +117,8 @@ def profiles(request: Request):
                 "max_samples": min(catalog.settings.max_samples, profile.max_samples),
                 "available": ok,
                 "unavailable_reason": reason,
-                "warnings": WARNINGS.get(profile.algorithm, []),
+                "warnings": warnings,
+                "purification": purification,
             }
         )
     return {"profiles": result}

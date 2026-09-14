@@ -3,6 +3,7 @@ import test from 'node:test';
 import type { ClusteringClusterGroup, ClusteringResultItem } from '../../shared/clustering.js';
 import {
   cancelClusteringJob,
+  fetchClusteringBaseline,
   fetchClusteringHealth,
   fetchClusteringJob,
   fetchClusteringJobItems,
@@ -461,4 +462,60 @@ test('a cluster selected beyond the cap is kept visible so it can be unselected'
   const visible = ordered.filter((cluster, index) => index < MAX_VISIBLE || chosen.has(cluster.clusterId));
   assert.ok(visible.some((cluster) => cluster.clusterId === smallest.clusterId));
   assert.equal(visible.length, MAX_VISIBLE + 1);
+});
+
+// ---------------------------------------------------------------- SPEAR / 离线基准
+
+test('purify override is sent as a boolean when the caller asks for a control run', async () => {
+  const stub = stubFetch(
+    jsonResponse({ success: true, data: { summary: {}, clusters: [], items: [], visualization: [] }, error: null }),
+  );
+  try {
+    await runClustering([{ id: 'a', text: '未设置警戒围栏', metadata: {} }], {
+      profileId: 'spear_purified',
+      purify: false,
+    });
+    const body = JSON.parse(String(stub.calls[0].init?.body));
+    assert.equal(body.options.purify, false);
+  } finally {
+    stub.restore();
+  }
+});
+
+test('omitting the purify override leaves it out of the body entirely', async () => {
+  const stub = stubFetch(
+    jsonResponse({ success: true, data: { summary: {}, clusters: [], items: [], visualization: [] }, error: null }),
+  );
+  try {
+    await runClustering([{ id: 'a', text: '未设置警戒围栏', metadata: {} }], { profileId: 'spear_purified' });
+    const body = JSON.parse(String(stub.calls[0].init?.body));
+    assert.ok(!('purify' in body.options));
+  } finally {
+    stub.restore();
+  }
+});
+
+test('offline baseline uses the relative endpoint and unwraps the envelope', async () => {
+  const stub = stubFetch(
+    jsonResponse({
+      success: true,
+      data: {
+        source: 'unit-test',
+        fullRun: true,
+        rows: { nr0: { ari: 0.1528 }, spear_purified_retrieval: { ari: 0.2705 } },
+        comparison: { ari: 0.1177, ariRelative: 0.7703 },
+      },
+      error: null,
+    }),
+  );
+  try {
+    const baseline = await fetchClusteringBaseline();
+    assert.equal(stub.calls[0].url, '/api/clustering/baseline');
+    assert.equal(baseline.rows.nr0.ari, 0.1528);
+    assert.equal(baseline.comparison?.ariRelative, 0.7703);
+    // 离线演示要求零外链：任何绝对 URL 都会在离网环境下白屏
+    assert.ok(!/^https?:/.test(stub.calls[0].url));
+  } finally {
+    stub.restore();
+  }
 });

@@ -14,6 +14,8 @@ import pytest
 from pydantic import ValidationError
 
 from app.schemas.clustering import (
+    ClusterResultItem,
+    ClusterSummary,
     ClusteringRunRequest,
     DatasetItem,
     EngineStatus,
@@ -22,6 +24,8 @@ from app.schemas.clustering import (
     ProfileInfo,
     ProfilesData,
     ProfilesEnvelope,
+    PurificationReportInfo,
+    PurificationStatusInfo,
     RunOptions,
 )
 
@@ -153,3 +157,77 @@ def test_health_envelope_rejects_inconsistent_status():
 
     with pytest.raises(ValidationError):
         HealthEnvelope(success=True, data=data, error=None, status="healthy")
+
+
+def test_purify_override_is_optional_and_typed():
+    """净化开关是可选布尔：不传表示"按 profile"，传 false 才是对照实验。"""
+
+    assert RunOptions().purify is None
+    assert RunOptions.model_validate({"purify": False}).purify is False
+    assert RunOptions.model_validate({"purify": True}).purify is True
+
+
+def test_purification_contract_round_trips_between_camel_and_snake():
+    """新增的净化字段必须能双向往返：前端 camelCase ↔ 后端 snake_case。"""
+
+    profile = ProfileInfo(
+        profile_id="spear_purified",
+        algorithm="agglomerative",
+        model_id="bge-large-zh-v1.5",
+        implementation_version="spear-v1",
+        max_samples=300000,
+        available=True,
+        purification=PurificationStatusInfo(
+            enabled=True,
+            requested_backend="auto",
+            effective_backend="rule",
+            degraded=True,
+            reason="purification_model_missing",
+            guarded=True,
+        ),
+    )
+    dumped = profile.model_dump(by_alias=True)
+    assert dumped["purification"]["requestedBackend"] == "auto"
+    assert dumped["purification"]["effectiveBackend"] == "rule"
+    assert "requested_backend" not in dumped["purification"]
+
+    # camelCase 往返回来仍能构造出同一个对象
+    restored = ProfileInfo.model_validate(dumped)
+    assert restored.purification is not None
+    assert restored.purification.effective_backend == "rule"
+
+    summary = ClusterSummary(
+        run_id="run_" + "0" * 32,
+        total_samples=4,
+        cluster_count=2,
+        noise_count=0,
+        largest_cluster_size=3,
+        smallest_cluster_size=1,
+        avg_cluster_size=2.0,
+        algorithm="agglomerative",
+        profile_id="spear_purified",
+        model_id="bge-large-zh-v1.5",
+        implementation_version="spear-v1",
+        embedding_dimension=1024,
+        cache_hit=False,
+        elapsed_ms=10,
+        gateway_ms=12,
+        purification=PurificationReportInfo(
+            enabled=True,
+            backend="rule",
+            requested_backend="auto",
+            degraded=True,
+            reason="purification_model_missing",
+            guarded=True,
+            guard_hits=1,
+            total=4,
+            elapsed_ms=0.5,
+            samples=[{"id": "a", "raw": "原文", "condensed": "浓缩"}],
+        ),
+    )
+    dumped_summary = summary.model_dump(by_alias=True)
+    assert dumped_summary["purification"]["guardHits"] == 1
+    assert dumped_summary["purification"]["samples"][0]["condensed"] == "浓缩"
+
+    item = ClusterResultItem(id="a", text="原文", cluster_id=0, cluster_label="簇 0", purified_text="浓缩")
+    assert item.model_dump(by_alias=True)["purifiedText"] == "浓缩"

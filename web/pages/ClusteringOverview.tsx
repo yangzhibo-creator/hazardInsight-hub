@@ -11,9 +11,15 @@ import type {
   ClusteringClusterGroup,
   ClusteringData,
   ClusteringDatasetItem,
+  ClusteringOfflineBaseline,
   ClusteringResultItem,
 } from '../../shared/clustering';
-import { fetchClusteringSample, runClustering, uploadClusteringDataset } from '../api/clustering';
+import {
+  fetchClusteringBaseline,
+  fetchClusteringSample,
+  runClustering,
+  uploadClusteringDataset,
+} from '../api/clustering';
 import { ClusterFilterBar } from '../components/ClusterFilterBar';
 import { ClusterItemDetail } from '../components/ClusterItemDetail';
 import { ClusterScatter } from '../components/ClusterScatter';
@@ -46,6 +52,14 @@ export function ClusteringOverview() {
   const [result, setResult] = useState<ClusteringData | null>(null);
   const [running, setRunning] = useState(false);
   const [runError, setRunError] = useState('');
+  /**
+   * 净化开关：`profile` 表示完全按 profile 执行，`on`/`off` 是现场对照实验。
+   * 只在所选 profile 的实现版本带净化能力时才有意义（见 selectedProfile）。
+   */
+  const [purifyMode, setPurifyMode] = useState<'profile' | 'on' | 'off'>('profile');
+  const [baseline, setBaseline] = useState<ClusteringOfflineBaseline | null>(null);
+  const [baselineBusy, setBaselineBusy] = useState(false);
+  const [baselineError, setBaselineError] = useState('');
   const [activeClusterId, setActiveClusterId] = useState<number | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [page, setPage] = useState(1);
@@ -129,12 +143,38 @@ export function ClusteringOverview() {
    * 算法名硬编码——否则新增策略时这里会先一步把用户拦住，而后端其实是支持的。
    * 未显式选择 profile 时按 2 处理：后端自动挑选的仍是 legacy 算法。
    */
-  const minItems = useMemo(() => {
-    const picked = selectableProfiles.find((profile) => profile.profileId === profileId);
-    return picked?.capability?.supportsSingleItem ? 1 : 2;
-  }, [profileId, selectableProfiles]);
+  const selectedProfile = useMemo(
+    () => selectableProfiles.find((profile) => profile.profileId === profileId),
+    [profileId, selectableProfiles],
+  );
+
+  const minItems = useMemo(
+    () => (selectedProfile?.capability?.supportsSingleItem ? 1 : 2),
+    [selectedProfile],
+  );
+
+  /**
+   * 所选 profile 是否带输入层语义净化（spear-v1）。
+   * 能力从后端下发的 `capability.purification` 读取，前端不按 profile 名硬编码。
+   */
+  const purificationSupported = Boolean(selectedProfile?.capability?.purification);
+
+  const purifyOverride = purifyMode === 'profile' ? undefined : purifyMode === 'on';
 
   const canRun = Boolean(dataset && dataset.items.length >= minItems) && !running && !datasetBusy;
+
+  /** 加载离线基准结果：实时计算失败或时间不够时的兜底入口。 */
+  const loadBaseline = useCallback(async () => {
+    setBaselineBusy(true);
+    setBaselineError('');
+    try {
+      setBaseline(await fetchClusteringBaseline());
+    } catch (cause) {
+      setBaselineError((cause as Error).message);
+    } finally {
+      setBaselineBusy(false);
+    }
+  }, []);
 
   const start = useCallback(async () => {
     if (!dataset || dataset.items.length < minItems) {
@@ -149,6 +189,7 @@ export function ClusteringOverview() {
         profileId: profileId || undefined,
         visualize,
         reduceMethod: visualize ? 'pca' : 'none',
+        purify: purifyOverride,
       });
       setResult(next);
       setActiveClusterId(null);
@@ -160,7 +201,7 @@ export function ClusteringOverview() {
     } finally {
       setRunning(false);
     }
-  }, [dataset, algorithm, profileId, visualize, minItems, setRowClusterFilter]);
+  }, [dataset, algorithm, profileId, visualize, purifyOverride, minItems, setRowClusterFilter]);
 
   // 明细表过滤（含簇筛选/关键词搜索/表头筛选）与排序，全部由 useTableQuery 统一提供。
   const filteredItems = table.rows;
@@ -286,6 +327,25 @@ export function ClusteringOverview() {
             <input type="checkbox" checked={visualize} disabled={running} onChange={(event) => setVisualize(event.target.checked)} />
             计算二维散点坐标（PCA，仅用于展示）
           </label>
+          {/*
+            净化开关只在所选 profile 属于 spear-v1 时出现。`profile` 是默认值：
+            现场正常演示按 profile 口径执行，只有做对照实验才手动覆盖。
+          */}
+          {purificationSupported && (
+            <label>
+              语义净化
+              <select
+                className="select"
+                value={purifyMode}
+                disabled={running}
+                onChange={(event) => setPurifyMode(event.target.value as 'profile' | 'on' | 'off')}
+              >
+                <option value="profile">按 profile（推荐）</option>
+                <option value="on">强制开启</option>
+                <option value="off">关闭（对照组）</option>
+              </select>
+            </label>
+          )}
           <span className="small muted">
             {engine.health
               ? `引擎已加载 ${engine.health.engine.profilesTotal} 个 profile，其中 ${engine.health.engine.profilesAvailable} 个可执行`
@@ -299,6 +359,77 @@ export function ClusteringOverview() {
         <p className="small muted">
           支持 CSV / XLSX / JSON / TXT，自动识别文本列；最多 30 万条、200 MB。文本会做规范化清洗（全角转半角、去控制字符、合并空白）。
         </p>
+        <p className="small muted">
+          现场耗时预期：向量嵌入约 10 秒（全量 20,198 条）· 语义净化约 0.3–0.5 秒/条（开启且首条需等模型装载约 20 秒）·
+          无净化全量端到端约 214 秒。样本量越大越建议改用下方异步作业面板。
+        </p>
+      </section>
+
+      {/*
+        离线基准结果：现场演示的兜底入口。
+        归档数字与实时结果必须区分开，因此这里把 source / verifiedAt / fullRun
+        原样展示，不做美化，也不与本次运行的统计混排。
+      */}
+      <section className="card card-pad" aria-label="离线基准结果">
+        <div className="clustering-section-head">
+          <h2>离线基准结果</h2>
+          <button className="btn btn-outline btn-sm" disabled={baselineBusy} onClick={() => void loadBaseline()}>
+            <IconRefresh size={14} />{baselineBusy ? '加载中…' : '加载离线基准结果'}
+          </button>
+        </div>
+        <p className="small muted">
+          实时计算失败或时间不足时的兜底：直接展示已归档的论文复现指标。归档结果是全量 20,198 条口径，
+          与本次实时运行是两回事——出处与口径会显示在下方，不做混合。
+        </p>
+        {baselineError && <p className="clustering-notice">{baselineError}</p>}
+        {baseline && (
+          <>
+            <p className="small muted">
+              出处：{baseline.source}
+              {baseline.verifiedAt ? ` · 记录于 ${baseline.verifiedAt}` : ''} ·{' '}
+              {baseline.fullRun ? '全量口径' : '抽样口径（指标不具可比性）'}
+            </p>
+            <div className="clustering-table-scroll">
+              <table className="table clustering-table">
+                <thead>
+                  <tr>
+                    <th>配置</th>
+                    <th>ARI</th>
+                    <th>VM</th>
+                    <th>聚类数</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {Object.entries(baseline.rows).map(([name, metrics]) => (
+                    <tr key={name}>
+                      <td>{name}</td>
+                      <td>{metrics.ari ?? '—'}</td>
+                      <td>{metrics.vm ?? '—'}</td>
+                      <td>{metrics.nClusters ?? '—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {baseline.comparison && baseline.comparison.ari !== undefined && (
+              <p className="small">
+                相对基线增益：ARI{' '}
+                <strong>
+                  {baseline.comparison.ari >= 0 ? '+' : ''}
+                  {baseline.comparison.ari}
+                </strong>
+                {baseline.comparison.ariRelative !== undefined && (
+                  <>（{(baseline.comparison.ariRelative * 100).toFixed(1)}%）</>
+                )}
+                {baseline.comparison.vm !== undefined && <> · VM {baseline.comparison.vm >= 0 ? '+' : ''}{baseline.comparison.vm}</>}
+                {baseline.comparison.nClusters !== undefined && <> · 聚类数 {baseline.comparison.nClusters >= 0 ? '+' : ''}{baseline.comparison.nClusters}</>}
+              </p>
+            )}
+            {(baseline.notes ?? []).map((note) => (
+              <p key={note} className="small muted">{note}</p>
+            ))}
+          </>
+        )}
       </section>
 
       {/*
@@ -314,6 +445,7 @@ export function ClusteringOverview() {
           profileId: profileId || undefined,
           visualize,
           reduceMethod: visualize ? 'pca' : 'none',
+          purify: purifyOverride,
         }}
         disabled={!engine.ready || datasetBusy}
       />
@@ -399,11 +531,74 @@ export function ClusteringOverview() {
             )}
           </section>
 
+          {/*
+            净化前后对照：演示里最有说服力的一屏。
+            这里展示的是引擎真实产出的净化结果（不是前端模拟），因此同时把
+            后端、是否降级、护栏拦截条数一并显示——"用的什么净化"本身就是结论的一部分。
+          */}
+          {summary.purification && (
+            <section className="card card-pad" aria-label="语义净化">
+              <div className="clustering-section-head">
+                <h2>阶段 1 · 语义净化</h2>
+                <span className="small muted">
+                  净化只做剥离与压缩，不判定缺陷类别；否定词等极性表述由确定性护栏保证不丢失。
+                </span>
+              </div>
+              <p className="small muted">
+                后端：<strong>{summary.purification.backend}</strong>
+                {summary.purification.requestedBackend !== summary.purification.backend
+                  ? `（请求 ${summary.purification.requestedBackend}）`
+                  : ''}{' '}
+                · 护栏：
+                {summary.purification.guarded
+                  ? `开启，拦截 ${summary.purification.guardHits}/${summary.purification.total} 条`
+                  : '关闭'}{' '}
+                · 耗时 {summary.purification.elapsedMs} ms
+              </p>
+              {summary.purification.degraded && (
+                <p className="clustering-notice">
+                  净化已降级为规则兜底（原因：{summary.purification.reason ?? '未知'}）。
+                  降级不影响结果可复现，但净化质量低于论文口径，演示时应如实说明。
+                </p>
+              )}
+              {summary.purification.samples.length ? (
+                <div className="clustering-table-scroll">
+                  <table className="table clustering-table">
+                    <thead>
+                      <tr>
+                        <th>ID</th>
+                        <th>原始文本</th>
+                        <th>浓缩文本</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {summary.purification.samples.map((sample) => (
+                        <tr key={sample.id}>
+                          <td>{sample.id}</td>
+                          <td>{sample.raw}</td>
+                          <td>{sample.condensed}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <p className="small muted">本次运行没有返回净化对照样本（关闭净化时属正常）。</p>
+              )}
+            </section>
+          )}
+
           <section className="card card-pad">
             <div className="clustering-section-head">
               <h2>二维分布</h2>
               <span className="small muted">点击图例或散点可高亮某个簇；明细表的筛选条按所属簇过滤样本。</span>
             </div>
+            {summary.implementationVersion === 'spear-v1' && (result?.visualization?.length ?? 0) === 0 && (
+              <p className="clustering-notice">
+                spear-v1 的聚类空间来自净化后的文本，网关不复现该空间，因此本路径不生成二维坐标；
+                簇结构与逐条归属不受影响。需要散点图请用 legacy / semantic profile。
+              </p>
+            )}
             <ClusterScatter
               points={result?.visualization ?? []}
               clusters={result?.clusters ?? []}

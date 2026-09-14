@@ -71,6 +71,8 @@ class ClusteringService:
         #: semantic-v1 的文本级缓存与策略实例：与 legacy 批缓存**并存**，互不影响。
         self._text_cache = None
         self._strategies = {}
+        #: spear-v1 的净化器注册表（Qwen 只装载一次，见陷阱 P3）；legacy 路径不会构造它。
+        self._purifiers = None
 
     def text_cache(self):
         """惰性构造文本级缓存；legacy 路径永远不会创建它。"""
@@ -80,6 +82,36 @@ class ClusteringService:
 
             self._text_cache = TextEmbeddingCache(self.settings.artifacts_dir / "text_embeddings")
         return self._text_cache
+
+    def purifier_registry(self):
+        """惰性构造净化器注册表；legacy 路径不会创建它，也就不会加载 torch。"""
+
+        if self._purifiers is None:
+            from ..purification import PurifierRegistry
+
+            self._purifiers = PurifierRegistry()
+        return self._purifiers
+
+    @staticmethod
+    def _with_overrides(profile, purification_override):
+        """把请求级的净化覆盖应用到已解析的 profile 上。
+
+        只覆盖显式给出的字段；``None`` 表示"沿用 profile"。没有净化口径的
+        legacy/semantic profile 收到覆盖时必须报错——静默忽略会让调用方以为
+        自己成功关掉了净化，而实际结果仍是另一回事。
+        """
+
+        if not purification_override:
+            return profile
+        changes = {key: value for key, value in purification_override.items() if value is not None}
+        if not changes:
+            return profile
+        if profile.purification is None:
+            raise ClusterError("INVALID_PROFILE", "Purification override requires a spear-v1 profile", 422)
+        from dataclasses import replace
+
+        # replace 会重新走 PurificationSpec.__post_init__，因此非法覆盖值照样被拦下
+        return replace(profile, purification=replace(profile.purification, **changes))
 
     def _strategy(self, profile):
         """按实现版本取回 Strategy；legacy profile 返回 None。
@@ -100,6 +132,11 @@ class ClusteringService:
                 catalog=self.catalog,
                 encoders=self.encoders,
                 text_cache=self.text_cache(),
+                # SPEAR 复用 legacy 的嵌入缓存与检索器实例：既是性能考虑，
+                # 也是"关掉净化后逐位一致"的结构性前提。
+                embedder=self.embeddings,
+                retriever_for=self.retriever,
+                purifiers=self.purifier_registry(),
             )
         return self._strategies[key]
 
@@ -144,6 +181,7 @@ class ClusteringService:
         """
         started = time.monotonic()
         profile = self.catalog.profile(request["profile_id"])
+        profile = self._with_overrides(profile, request.get("purification"))
         items = request["items"]
 
         # semantic-v1 有自己的准入规则（允许单条、允许空白项被判 invalid），

@@ -31,6 +31,12 @@ packages = ["src/retrain_cluster"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src", "."]
+# 默认排除 integration：那些用例需要真实本地模型与 torch，CI / 预演机上
+# 不该因为"没带 55 GB 权重"而变红。需要时显式 `pytest -m integration`。
+addopts = "-q -m 'not integration'"
+markers = [
+    "integration: 需要真实本地向量模型 / 本地 LLM 与 GPU 的端到端测试（默认跳过，用 -m integration 运行）",
+]
 
 [tool.ruff]
 target-version = "py312"

@@ -24,6 +24,8 @@ from app.core.errors import ClusteringTimeoutError, FileTooLargeError
 from app.schemas.clustering import (
     AlgorithmsData,
     AlgorithmsEnvelope,
+    BaselineData,
+    BaselineEnvelope,
     ClusteringData,
     ClusteringEnvelope,
     ClusteringJobEnvelope,
@@ -103,6 +105,20 @@ async def sample_dataset(
         data=SampleData(source_name=payload["source_name"], items=payload["items"]),
         error=None,
     )
+
+
+@router.get("/baseline", response_model=BaselineEnvelope, summary="读取离线基准结果")
+async def offline_baseline(
+    service: ClusteringGatewayService = Depends(get_cluster_service),
+) -> BaselineEnvelope:
+    """返回已归档的指标，供实时计算失败或时间不足时兜底展示。
+
+    响应里带 `source` / `verified_at` / `fullRun`，界面必须原样展示出处——
+    归档数字与实时结果是两回事，不能混为一谈。
+    """
+
+    payload = await run_in_threadpool(service.load_offline_baseline)
+    return BaselineEnvelope(success=True, data=BaselineData(**payload), error=None)
 
 
 @router.post("/datasets", response_model=DatasetEnvelope, summary="上传并解析数据文件")

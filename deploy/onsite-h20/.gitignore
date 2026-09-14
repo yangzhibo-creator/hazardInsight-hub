@@ -1,0 +1,13 @@
+# 构建输入：大文件不进 git，由交付介质在构建前拷入
+wheels/
+assets/models/
+assets/knowledge_bases/
+assets/purify_map.json
+
+# 构建产物
+*.tar
+*.tar.sha256
+
+# Vite 构建会覆盖这里；只保留仓库里的占位页
+web-dist/assets/
+web-dist/index.html.bak

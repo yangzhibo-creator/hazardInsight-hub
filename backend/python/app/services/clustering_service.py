@@ -84,6 +84,8 @@ def _capability_of(implementation_version: str) -> dict[str, Any]:
                     # 校准版本是 profile 级别的（同一版本可挂不同校准），
                     # 因此这里恒为 None，真实值在 ProfileInfo.calibration_id 上。
                     "calibration_version": entry.get("calibration_version"),
+                    # spear-v1 的输入层净化是版本级能力，前端据此显示"净化"开关
+                    "purification": bool(entry.get("purification")),
                 }
         except Exception as exc:  # noqa: BLE001 - 引擎依赖缺失不应让元信息接口变成 500
             logger.debug("能力表加载失败，退回保守默认值：%s", exc)
@@ -94,6 +96,7 @@ def _capability_of(implementation_version: str) -> dict[str, Any]:
                 "supports_single_item": False,
                 "supports_cache_only": False,
                 "calibration_version": None,
+                "purification": False,
             },
         )
     return _CAPABILITY_CACHE[implementation_version]
@@ -265,6 +268,34 @@ class ClusteringGatewayService:
         except Exception as exc:  # noqa: BLE001
             return False, getattr(exc, "code", "PROFILE_UNAVAILABLE")
 
+    @staticmethod
+    def _purification_status(profile: Any) -> dict[str, Any] | None:
+        """净化的可用性快照；legacy / semantic profile 返回 None。
+
+        只做无副作用的探测（不加载 55 GB 权重），并把 ``model_path`` 从对外
+        载荷里剔除——profile 列表是前端可见的，不应暴露宿主机路径。
+        """
+
+        spec = getattr(profile, "purification", None)
+        if spec is None:
+            return None
+        try:
+            from retrain_cluster.purification import probe
+
+            payload = probe(spec).as_dict()
+            payload.pop("model_path", None)
+            return payload
+        except Exception as exc:  # noqa: BLE001 - 探测失败不能拖垮元信息接口
+            logger.warning("净化状态探测失败（%s），按降级处理。", exc)
+            return {
+                "enabled": bool(getattr(spec, "enabled", False)),
+                "requested_backend": getattr(spec, "backend", "unknown"),
+                "effective_backend": "rule",
+                "degraded": True,
+                "reason": "purification_probe_failed",
+                "guarded": bool(getattr(spec, "guard", True)),
+            }
+
     def list_profiles(self, *, refresh: bool = False) -> list[dict[str, Any]]:
         """列出引擎中可通过 API 使用的 profile 及其可用状态。"""
 
@@ -281,6 +312,11 @@ class ClusteringGatewayService:
             if profile.algorithm not in API_ALGORITHMS:
                 continue
             available, reason = self._profile_status(profile)
+            warnings = list(WARNINGS.get(profile.algorithm, []))
+            purification = self._purification_status(profile)
+            if purification and purification.get("degraded"):
+                # 净化是软依赖：降级不影响 profile 可用，但必须让调用方看见
+                warnings.append("PURIFIER_DEGRADED_TO_RULE")
             profiles.append(
                 {
                     "profile_id": profile.profile_id,
@@ -293,11 +329,12 @@ class ClusteringGatewayService:
                     "max_samples": min(MAX_ITEMS, profile.max_samples),
                     "available": available,
                     "unavailable_reason": reason,
-                    "warnings": list(WARNINGS.get(profile.algorithm, [])),
+                    "warnings": warnings,
                     # semantic profile 的阈值来自校准文件，profile 只引用它的 ID；
                     # 把 ID 透出，前端可以据此说明"这批阈值尚未经人工校准验证"。
                     "calibration_id": getattr(profile, "calibration_id", None),
                     "capability": _capability_of(profile.implementation_version),
+                    "purification": purification,
                 }
             )
         profiles.sort(
@@ -388,6 +425,54 @@ class ClusteringGatewayService:
             raise SampleDatasetError("内置示例数据中没有可用样本。")
         dataset = payload.get("dataset_id", path.stem) if isinstance(payload, dict) else path.stem
         return {"source_name": f"示例数据 · {dataset}", "items": items}
+
+    def load_offline_baseline(self) -> dict[str, Any]:
+        """读取离线基准结果（现场兜底展示）。
+
+        数字来自归档文件而不是现场计算，因此调用方必须能看到 `source` 与
+        `full_run`：抽样口径的指标不具可比性，这一点不能让界面替它隐瞒。
+        相对增益在网关侧统一计算，避免前端各自实现一套公式。
+        """
+
+        path = Path(__file__).resolve().parents[1] / "data" / "offline_baseline.json"
+        if not path.is_file():
+            raise ClusteringError("离线基准结果文件不存在，无法离线展示。")
+        import json
+
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise ClusteringError(f"离线基准结果解析失败：{exc}") from exc
+        if not isinstance(payload, dict) or not isinstance(payload.get("rows"), dict):
+            raise ClusteringError("离线基准结果结构不合法。")
+
+        rows = payload["rows"]
+        base_key = payload.get("baseline_key") or next(iter(rows), None)
+        target_key = payload.get("target_key") or next((key for key in rows if key != base_key), None)
+        comparison: dict[str, float] = {}
+        base, target = rows.get(base_key) or {}, rows.get(target_key) or {}
+        # 自由字典的键不会被 pydantic 的别名生成器改写，因此这里直接产出 camelCase，
+        # 与前端 TypeScript 类型（shared/clustering.ts）逐字对齐。
+        for metric, output_key in (
+            ("ari", "ari"),
+            ("vm", "vm"),
+            ("fms", "fms"),
+            ("ami", "ami"),
+            ("hs", "hs"),
+            ("cs", "cs"),
+            ("score", "score"),
+            ("n_clusters", "nClusters"),
+            ("noise_ratio", "noiseRatio"),
+        ):
+            left, right = base.get(metric), target.get(metric)
+            if isinstance(left, (int, float)) and isinstance(right, (int, float)):
+                comparison[output_key] = round(float(right) - float(left), 4)
+        if base.get("ari"):
+            comparison["ariRelative"] = round(
+                (float(target["ari"]) - float(base["ari"])) / float(base["ari"]), 4
+            )
+        payload["comparison"] = comparison
+        return payload
 
     def parse_dataset(self, data: bytes, filename: str) -> dict[str, Any]:
         """把上传的数据文件规范成样本列表。
@@ -527,7 +612,7 @@ class ClusteringGatewayService:
             raise InvalidInputError("样本 ID 必须唯一，请检查输入数据。")
 
         from retrain_cluster.clustering.registry import validate_params
-        from retrain_cluster.services.strategies import LEGACY_VERSION, SEMANTIC_VERSION
+        from retrain_cluster.services.strategies import LEGACY_VERSION, SEMANTIC_VERSION, SPEAR_VERSION
 
         engine = self._require_engine()
         profile = self._resolve_profile(options)
@@ -546,6 +631,20 @@ class ClusteringGatewayService:
                 sample_ids=sample_ids,
                 texts=texts,
                 metadata=metadata,
+                started=started,
+            )
+
+        if implementation == SPEAR_VERSION:
+            # SPEAR 的净化发生在引擎内部：网关只负责把"开/关净化"这一意图
+            # 原样透传，并把引擎返回的净化报告挂到契约上，不重新实现净化。
+            validate_item_count(len(raw_items), minimum=MIN_ITEMS)
+            return self._run_spear(
+                engine=engine,
+                profile=profile,
+                sample_ids=sample_ids,
+                texts=texts,
+                metadata=metadata,
+                options=options,
                 started=started,
             )
 
@@ -808,4 +907,137 @@ class ClusteringGatewayService:
             "clusters": clusters,
             "items": items,
             "visualization": visualization,
+        }
+
+    # ------------------------------------------------------------------ spear 分支
+
+    def _run_spear(
+        self,
+        *,
+        engine: Any,
+        profile: Any,
+        sample_ids: list[str],
+        texts: list[str],
+        metadata: list[dict[str, Any]],
+        options: dict[str, Any],
+        started: float,
+    ) -> dict[str, Any]:
+        """spear-v1：净化 + 表示增强 + 聚类，标签由引擎给出，网关只做契约拼装。
+
+        与 legacy 分支最关键的差别是**网关不再复现一次向量**。原因是 SPEAR 的
+        聚类空间来自"净化后的文本"，而网关手里只有原文；若为了画散点再编码一次
+        原文，展示用的坐标就与真实聚类空间不是同一个口径。宁可如实标注
+        "本路径不生成二维坐标"，也不返回一张与算法无关的图。
+        """
+
+        if not self._run_lock.acquire(blocking=False):
+            raise ServiceBusyError("已有聚类任务正在执行，请稍后重试。")
+        try:
+            engine_request: dict[str, Any] = {
+                "profile_id": profile.profile_id,
+                "items": [
+                    {"id": ident, "text": text, "metadata": meta}
+                    for ident, text, meta in zip(sample_ids, texts, metadata)
+                ],
+            }
+            # 请求级净化开关：只透传"开/关"，后端/护栏仍按 profile 决定
+            override = options.get("purify")
+            if override is not None:
+                engine_request["purification"] = {"enabled": bool(override)}
+            try:
+                result = engine.cluster(engine_request, enforce_api_limits=True)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("SPEAR 聚类执行失败：%s", exc)
+                raise _from_engine_error(exc) from exc
+        finally:
+            self._run_lock.release()
+
+        labels = np.asarray([item["cluster_id"] for item in result["assignments"]], dtype=int)
+        if labels.shape != (len(sample_ids),):
+            raise ClusteringError("引擎返回的标签数量与样本数不一致。")
+
+        report = dict(result.get("purification") or {})
+        condensed = {sample["id"]: sample["condensed"] for sample in report.get("samples") or []}
+        warnings = list(result.get("warnings") or [])
+        # 诚实标注：本路径没有生成二维坐标，前端不应把它当成"点了太少"
+        warnings.append("SPEAR_VIZ_NOT_COMPUTED")
+
+        groups: dict[int, list[int]] = {}
+        for index, label in enumerate(labels):
+            groups.setdefault(int(label), []).append(index)
+
+        clusters: list[dict[str, Any]] = []
+        for cluster_id in sorted(groups, key=lambda value: (value == NOISE_CLUSTER_ID, value)):
+            members = groups[cluster_id]
+            is_noise = cluster_id == NOISE_CLUSTER_ID
+            clusters.append(
+                {
+                    "cluster_id": cluster_id,
+                    "label": "未归类" if is_noise else f"簇 {cluster_id}",
+                    "size": len(members),
+                    "keywords": [],
+                    "cohesion": None,
+                    "representative_samples": [
+                        {
+                            "id": sample_ids[index],
+                            "text": condensed.get(sample_ids[index]) or texts[index],
+                            "confidence": None,
+                            "distance": None,
+                        }
+                        for index in members[: self.settings.digest_representatives]
+                    ],
+                    "metadata_distribution": {},
+                    "is_noise_bucket": is_noise,
+                }
+            )
+
+        items: list[dict[str, Any]] = []
+        for index, cluster_id in enumerate(labels):
+            ident = sample_ids[index]
+            items.append(
+                {
+                    "id": ident,
+                    "text": texts[index],
+                    "cluster_id": int(cluster_id),
+                    "cluster_label": "未归类" if int(cluster_id) == NOISE_CLUSTER_ID else f"簇 {int(cluster_id)}",
+                    "confidence": None,
+                    "distance": None,
+                    "keywords": [],
+                    "metadata": metadata[index],
+                    # 只有引擎确实返回了对照（上限 50 条）时才有值，其余为 null
+                    "purified_text": condensed.get(ident),
+                }
+            )
+
+        non_noise = [cluster for cluster in clusters if cluster["cluster_id"] != NOISE_CLUSTER_ID]
+        sizes = [cluster["size"] for cluster in non_noise]
+        gateway_ms = round((time.monotonic() - started) * 1000)
+        try:
+            embedding_dimension = int(self._catalog.model(profile.model_id)["dimension"])
+        except Exception:  # noqa: BLE001 - 维度只用于展示，取不到不影响结果
+            embedding_dimension = 0
+        summary = {
+            "run_id": result["run_id"],
+            "total_samples": len(sample_ids),
+            "cluster_count": len(non_noise),
+            "noise_count": int((labels == NOISE_CLUSTER_ID).sum()),
+            "largest_cluster_size": max(sizes) if sizes else 0,
+            "smallest_cluster_size": min(sizes) if sizes else 0,
+            "avg_cluster_size": round(sum(sizes) / len(sizes), 2) if sizes else 0.0,
+            "algorithm": result["algorithm"],
+            "profile_id": result["profile_id"],
+            "model_id": profile.model_id,
+            "implementation_version": result.get("implementation_version") or profile.implementation_version,
+            "embedding_dimension": embedding_dimension,
+            "cache_hit": False,
+            "elapsed_ms": int(result.get("elapsed_ms", 0)),
+            "gateway_ms": gateway_ms,
+            "warnings": warnings,
+            "purification": report or None,
+        }
+        return {
+            "summary": summary,
+            "clusters": clusters,
+            "items": items,
+            "visualization": [],
         }

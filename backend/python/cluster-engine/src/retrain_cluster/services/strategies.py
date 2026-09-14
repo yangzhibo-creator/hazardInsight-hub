@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from ..clustering.registry import SEMANTIC_ALGORITHMS as _REGISTERED_SEMANTIC_ALGORITHMS
+from ..clustering.registry import ALGORITHMS as _REGISTERED_ALGORITHMS
 from ..errors import ClusterError
 
 #: 历史实现版本（默认，行为冻结）。
@@ -23,6 +24,9 @@ LEGACY_VERSION = "legacy-v1"
 
 #: 新的中文语义自动聚类实现版本。
 SEMANTIC_VERSION = "semantic-v1"
+
+#: SPEAR（语义净化 + 表示增强 + 凝聚层次聚类）实现版本。
+SPEAR_VERSION = "spear-v1"
 
 #: semantic-v1 当前支持的算法标识。
 #:
@@ -32,6 +36,10 @@ SEMANTIC_VERSION = "semantic-v1"
 #: `semantic-v1`、按语义规则放行单条请求，而真正的失败要等到运行时才暴露。
 #: 派生之后"注册了才算支持"成为结构性事实，不需要靠人工同步维持。
 SEMANTIC_ALGORITHMS = tuple(_REGISTERED_SEMANTIC_ALGORITHMS)
+
+#: spear-v1 支持的算法：复用 legacy 的全部矩阵算法（SPEAR 只是换了输入与表示口径，
+#: 不改算法集合）。semantic_* 属于另一条实现路径，不能混进来。
+SPEAR_ALGORITHMS = tuple(name for name in _REGISTERED_ALGORITHMS if not name.startswith("semantic_"))
 
 
 @dataclass(frozen=True)
@@ -75,15 +83,21 @@ def strategy_for_version(implementation_version: str) -> str | None:
         return None
     if implementation_version == SEMANTIC_VERSION:
         return "semantic"
+    if implementation_version == SPEAR_VERSION:
+        return "spear"
     raise ClusterError("INVALID_PROFILE", "Unknown implementation version", 422)
 
 
-def build_strategy(profile, *, settings, catalog, encoders, text_cache=None) -> Any | None:
+def build_strategy(profile, *, settings, catalog, encoders, text_cache=None, embedder=None, retriever_for=None, purifiers=None) -> Any | None:
     """按 profile 构造 Strategy；legacy profile 返回 None。
 
     这里通过 ``strategy_for_version`` 查表而不是判断算法名，
     因此"新算法 + 旧版本"这种非法组合会在 Catalog 阶段就被拒绝，
     不会走到这里再静默降级。
+
+    ``embedder`` / ``retriever_for`` / ``purifiers`` 由 ClusteringService 注入：
+    SPEAR 必须复用 legacy 的嵌入缓存与检索器实例（缓存命中与实例复用是
+    "关掉净化后逐位一致"的前提），而不是自己另建一套。
     """
 
     kind = strategy_for_version(profile.implementation_version)
@@ -99,6 +113,18 @@ def build_strategy(profile, *, settings, catalog, encoders, text_cache=None) -> 
             catalog=catalog,
             encoders=encoders,
             text_cache=text_cache,
+        )
+    if kind == "spear":
+        from .spear_clustering import SpearStrategy
+
+        return SpearStrategy(
+            profile=profile,
+            settings=settings,
+            catalog=catalog,
+            encoders=encoders,
+            embedder=embedder,
+            retriever_for=retriever_for,
+            purifiers=purifiers,
         )
     raise ClusterError("INVALID_PROFILE", "Unknown strategy kind", 422)
 
@@ -121,6 +147,14 @@ def list_strategy_versions() -> list[dict]:
             "supports_cache_only": True,
             "calibration_version": None,  # 由 profile 自带，运行时才确定
         },
+        {
+            "implementation_version": SPEAR_VERSION,
+            "algorithms": list(SPEAR_ALGORITHMS),
+            "supports_single_item": False,
+            "supports_cache_only": False,
+            "calibration_version": None,
+            "purification": True,  # SPEAR 的输入层净化是这一版的标志性能力
+        },
     ]
 
 
@@ -128,6 +162,8 @@ __all__ = [
     "LEGACY_VERSION",
     "SEMANTIC_ALGORITHMS",
     "SEMANTIC_VERSION",
+    "SPEAR_ALGORITHMS",
+    "SPEAR_VERSION",
     "Strategy",
     "StrategyMeta",
     "build_strategy",

@@ -1,0 +1,38 @@
+{
+  "profile_id": "spear_purified_retrieval",
+  "algorithm": "agglomerative",
+  "model_id": "bge-large-zh-v1.5",
+  "algorithm_params": {
+    "distance_threshold": 2.6535528326328843
+  },
+  "features": {
+    "beta": 0.4973823453680069,
+    "n_results": 6,
+    "pca_dim": 0,
+    "reduction": "PCA",
+    "version": "spear-v1"
+  },
+  "purification": {
+    "enabled": true,
+    "backend": "auto",
+    "model_path": "../models/Qwen3.8-27B",
+    "cache_file": "../data/purify_map.json",
+    "device": "cuda",
+    "batch_size": 32,
+    "max_new_tokens": 64,
+    "guard": true
+  },
+  "knowledge_base_id": "bge-large-raw-lines-v1",
+  "implementation_version": "spear-v1",
+  "backend": "python",
+  "compatibility_status": "spear",
+  "source_result": null,
+  "source_sha256": null,
+  "max_samples": 300000,
+  "capability": {
+    "description": "SPEAR 完整框架：净化 + 检索增强（β=0.4974, k=6）+ Ward 凝聚层次聚类",
+    "purification_version": "spear-v1",
+    "pair_of": "bge-large-agglomerative-nr1-legacy-v1",
+    "notes": "purification.enabled=false 时与 bge-large-agglomerative-nr1-legacy-v1 逐位一致（ARI 0.2705 口径）"
+  }
+}

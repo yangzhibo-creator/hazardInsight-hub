@@ -43,6 +43,11 @@ export interface ClusteringRunOptions {
   visualize?: boolean;
   /** 二维降维方式。 */
   reduceMethod?: ClusterReduceMethod;
+  /**
+   * spear-v1 专用：覆盖 profile 的净化开关。
+   * `true/false` 用于现场对照实验，`null`（不传）表示完全按 profile 执行。
+   */
+  purify?: boolean | null;
 }
 
 /** 聚类请求体。 */
@@ -65,6 +70,40 @@ export interface ClusteringCapability {
   supportsCacheOnly: boolean;
   /** 阈值校准版本；legacy 为 null。 */
   calibrationVersion?: string | null;
+  /** 该实现版本是否带输入层语义净化（spear-v1）。 */
+  purification?: boolean;
+}
+
+/** 净化依赖的可用性快照（软依赖：缺失时降级而不是让 profile 不可用）。 */
+export interface ClusteringPurificationStatus {
+  enabled: boolean;
+  requestedBackend: string;
+  /** 实际生效的后端：`qwen` / `rule` / `cache` / `identity`。 */
+  effectiveBackend: string;
+  degraded: boolean;
+  reason?: string | null;
+  guarded: boolean;
+}
+
+/** 一条「净化前 → 净化后」对照。 */
+export interface ClusteringPurificationSample {
+  id: string;
+  raw: string;
+  condensed: string;
+}
+
+/** 本次执行里阶段 1（语义净化）的真实状态。 */
+export interface ClusteringPurificationReport {
+  enabled: boolean;
+  backend: string;
+  requestedBackend: string;
+  degraded: boolean;
+  reason?: string | null;
+  guarded: boolean;
+  guardHits: number;
+  total: number;
+  elapsedMs: number;
+  samples: ClusteringPurificationSample[];
 }
 
 /** 一个可用 profile 的描述。 */
@@ -85,6 +124,8 @@ export interface ClusteringProfileInfo {
   calibrationId?: string | null;
   /** 该 profile 所属实现版本的能力。 */
   capability?: ClusteringCapability | null;
+  /** spear-v1 的净化依赖状态；其它版本为 null。 */
+  purification?: ClusteringPurificationStatus | null;
 }
 
 /** 一种聚类算法的可用性。 */
@@ -208,6 +249,10 @@ export interface ClusteringResultItem {
   noiseReason?: string | null;
   confidenceVersion?: string | null;
   distanceMetric?: string | null;
+
+  // —— spear-v1 扩展 ——
+  /** 同一行的浓缩文本（引擎只返回前若干条，其余为 null）。 */
+  purifiedText?: string | null;
 }
 
 /** 二维散点坐标（仅用于可视化，不参与聚类计算）。 */
@@ -301,6 +346,10 @@ export interface ClusteringSummary {
   reduction?: Record<string, unknown> | null;
   /** 后处理日志：拆分 / 合并 / 小簇保护 / 规范编号。 */
   postprocess?: Record<string, unknown> | null;
+
+  // —— spear-v1 扩展 ——
+  /** 阶段 1（语义净化）的真实状态与前后对照；legacy/semantic 路径为 null。 */
+  purification?: ClusteringPurificationReport | null;
 }
 
 /** 聚类结果主体。 */
@@ -338,6 +387,43 @@ export interface ClusteringHealthData {
   service: string;
   version: string;
   engine: ClusteringEngineStatus;
+}
+
+/* ------------------------------------------------------------------ 离线基准 */
+
+/** 一组已归档的指标（离线基准里的一个配置）。 */
+export interface ClusteringBaselineMetrics {
+  ari?: number | null;
+  vm?: number | null;
+  fms?: number | null;
+  ami?: number | null;
+  hs?: number | null;
+  cs?: number | null;
+  nClusters?: number | null;
+  noiseRatio?: number | null;
+  score?: number | null;
+}
+
+/**
+ * 离线基准结果：现场实时计算失败或时间不够时，用它保证演示不中断。
+ *
+ * 刻意带 `source` 与 `verifiedAt`：展示已归档数字时必须写明出处，
+ * 不能与"本次实时计算的结果"混为一谈。
+ */
+export interface ClusteringOfflineBaseline {
+  /** 这批数字的来源说明（数据集口径、机器、论文出处）。 */
+  source: string;
+  /** 记录时间（ISO 字符串）。 */
+  verifiedAt?: string | null;
+  /** 是否是可复现的全量口径（false 表示抽样，指标不具可比性）。 */
+  fullRun: boolean;
+  /** 配置名（如 `nr0` / `spear_purified_retrieval`）→ 指标。 */
+  rows: Record<string, ClusteringBaselineMetrics>;
+  /** 相对基线的增益（由后端算好，前端不重复造口径）。 */
+  comparison?: Record<string, number> | null;
+  /** 可直接展示的文本表格。 */
+  table?: string | null;
+  notes?: string[];
 }
 
 /* ------------------------------------------------------------------ 异步作业 */

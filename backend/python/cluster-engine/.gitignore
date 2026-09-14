@@ -22,3 +22,15 @@ models/
 .pytest_cache/
 .ruff_cache/
 .cache/
+
+# -----------------------------------------------------------------------------
+# 例外：源码子包与运行期目录同名。
+#
+# `data/` 与 `artifacts/` 这两条无斜杠规则会匹配到任意层级的同名目录，
+# 因此一并把源码里的 `src/retrain_cluster/data/` 与
+# `src/retrain_cluster/artifacts/` 排除掉了——上游因此缺失整个子包，
+# `import retrain_cluster` 直接失败。下面显式把这两个源码目录收回。
+# 运行期目录（cluster-engine/data/、cluster-engine/artifacts/）仍然被忽略。
+# -----------------------------------------------------------------------------
+!src/retrain_cluster/data/
+!src/retrain_cluster/artifacts/

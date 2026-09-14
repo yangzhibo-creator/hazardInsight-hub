@@ -1,0 +1,38 @@
+{
+  "profile_id": "spear_purified",
+  "algorithm": "agglomerative",
+  "model_id": "bge-large-zh-v1.5",
+  "algorithm_params": {
+    "distance_threshold": 2.705561364162625
+  },
+  "features": {
+    "beta": 1.0,
+    "n_results": 0,
+    "pca_dim": 0,
+    "reduction": "PCA",
+    "version": "spear-v1"
+  },
+  "purification": {
+    "enabled": true,
+    "backend": "auto",
+    "model_path": "../models/Qwen3.8-27B",
+    "cache_file": "../data/purify_map.json",
+    "device": "cuda",
+    "batch_size": 32,
+    "max_new_tokens": 64,
+    "guard": true
+  },
+  "knowledge_base_id": null,
+  "implementation_version": "spear-v1",
+  "backend": "python",
+  "compatibility_status": "spear",
+  "source_result": null,
+  "source_sha256": null,
+  "max_samples": 300000,
+  "capability": {
+    "description": "SPEAR 阶段1+3：净化后的向量直接聚类（不做检索增强）",
+    "purification_version": "spear-v1",
+    "pair_of": "bge-large-agglomerative-nr0-legacy-v1",
+    "notes": "purification.enabled=false 时与 bge-large-agglomerative-nr0-legacy-v1 逐位一致"
+  }
+}

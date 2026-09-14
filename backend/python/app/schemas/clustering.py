@@ -53,6 +53,44 @@ class RunOptions(ApiModel):
     algorithm: str | None = Field(default=None, description="按算法名自动挑选可用 profile")
     visualize: bool = Field(default=True, description="是否计算二维可视化坐标")
     reduce_method: Literal["pca", "none"] = Field(default="pca", description="二维降维方式")
+    purify: bool | None = Field(
+        default=None,
+        description="spear-v1 专用：true/false 覆盖 profile 的净化开关；null 表示按 profile 执行",
+    )
+
+
+class PurificationStatusInfo(ApiModel):
+    """净化依赖的可用性快照（不含文件系统路径）。"""
+
+    enabled: bool
+    requested_backend: str
+    effective_backend: str
+    degraded: bool
+    reason: str | None = None
+    guarded: bool = True
+
+
+class PurificationSampleInfo(ApiModel):
+    """一条"净化前 → 净化后"对照。"""
+
+    id: str
+    raw: str
+    condensed: str
+
+
+class PurificationReportInfo(ApiModel):
+    """本次执行里阶段 1（语义净化）的真实状态。"""
+
+    enabled: bool
+    backend: str
+    requested_backend: str
+    degraded: bool
+    reason: str | None = None
+    guarded: bool = False
+    guard_hits: int = 0
+    total: int = 0
+    elapsed_ms: float = 0.0
+    samples: list[PurificationSampleInfo] = Field(default_factory=list)
 
 
 class ClusteringRunRequest(ApiModel):
@@ -77,6 +115,7 @@ class Capability(ApiModel):
     supports_single_item: bool = False
     supports_cache_only: bool = False
     calibration_version: str | None = None
+    purification: bool = Field(default=False, description="该实现版本是否带输入层语义净化（spear-v1）")
 
 
 class ProfileInfo(ApiModel):
@@ -95,6 +134,9 @@ class ProfileInfo(ApiModel):
     warnings: list[str] = Field(default_factory=list)
     calibration_id: str | None = Field(default=None, description="语义 profile 引用的校准配置 ID")
     capability: Capability | None = None
+    purification: PurificationStatusInfo | None = Field(
+        default=None, description="spear-v1 的净化依赖状态（软依赖，缺失时降级而非不可用）"
+    )
 
 
 class AlgorithmInfo(ApiModel):
@@ -207,6 +249,8 @@ class ClusterResultItem(ApiModel):
     noise_reason: str | None = None
     confidence_version: str | None = None
     distance_metric: str | None = None
+    # —— spear-v1 扩展：同一行的浓缩文本，用于"净化前后对照" ——
+    purified_text: str | None = Field(default=None, description="净化后的浓缩文本（spear-v1 才有）")
 
 
 class VisualizationPoint(ApiModel):
@@ -276,6 +320,8 @@ class ClusterSummary(ApiModel):
     auto_k: dict[str, Any] | None = None
     reduction: dict[str, Any] | None = None
     postprocess: dict[str, Any] | None = None
+    # —— spear-v1 扩展：阶段 1（语义净化）的真实状态与前后对照 ——
+    purification: PurificationReportInfo | None = None
 
 
 class ClusteringData(ApiModel):
@@ -458,11 +504,42 @@ class SampleData(ApiModel):
     items: list[DatasetItem] = Field(default_factory=list)
 
 
+class BaselineMetrics(ApiModel):
+    """离线基准里一个配置的指标（缺失即 null，不猜）。"""
+
+    ari: float | None = None
+    vm: float | None = None
+    fms: float | None = None
+    ami: float | None = None
+    hs: float | None = None
+    cs: float | None = None
+    n_clusters: int | None = None
+    noise_ratio: float | None = None
+    score: float | None = None
+
+
+class BaselineData(ApiModel):
+    """离线基准结果：现场实时计算失败时的兜底展示。
+
+    与实时结果的区别必须写在 `source` / `verified_at` / `full_run` 上——
+    展示归档数字而不说明出处，等于把演示变成误导。
+    """
+
+    source: str
+    verified_at: str | None = None
+    full_run: bool = True
+    rows: dict[str, BaselineMetrics] = Field(default_factory=dict)
+    comparison: dict[str, float] | None = None
+    table: str | None = None
+    notes: list[str] = Field(default_factory=list)
+
+
 #: 聚类接口的响应类型别名，方便在路由里直接引用。
 ClusteringEnvelope = Envelope[ClusteringData]
 ProfilesEnvelope = Envelope[ProfilesData]
 AlgorithmsEnvelope = Envelope[AlgorithmsData]
 SampleEnvelope = Envelope[SampleData]
+BaselineEnvelope = Envelope[BaselineData]
 DatasetEnvelope = Envelope[DatasetPreview]
 
 #: 异步作业相关响应（作业状态 / 结果摘要 / 明细分页 / 筛选取值 / 数据集列表）。

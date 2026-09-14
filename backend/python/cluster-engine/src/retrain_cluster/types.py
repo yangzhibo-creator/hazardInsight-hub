@@ -67,12 +67,62 @@ class FeatureSpec:
         # 版本白名单：约束住可以被复现的行为集合。
         # semantic-v1 是"标记位"，语义流程不经过 FeaturePipeline，
         # 它的 L2/PCA 由 features/semantic.py 按自己的确定性规则完成。
+        # spear-v1 复用 legacy 的 FeaturePipeline（检索增强 + 降维），
+        # 唯一差异是"送进管道的矩阵来自净化后文本"。
         if self.reduction not in {"PCA", "UMAP"} or self.version not in {
             "legacy-v1",
             "legacy-radbscan-v1",
             "semantic-v1",
+            "spear-v1",
         }:
             raise ClusterError("INVALID_PROFILE", "Unknown feature behavior version", 422)
+
+
+#: 合法的净化后端（与 purification.registry 的实现一一对应）。
+#: 放在 types 里是为了让 profile 的构造期校验与运行时实现共用同一份白名单，
+#: 避免"配置写了一个后端名、运行时悄悄回落到默认值"这种静默不一致。
+PURIFICATION_BACKENDS = ("auto", "qwen", "rule", "cache")
+
+
+@dataclass(frozen=True)
+class PurificationSpec:
+    """SPEAR 阶段 1（语义净化）的配置口径，对应 profile JSON 里的 ``purification``。
+
+    为什么要独立于 ``FeatureSpec``：
+    * 生命周期不同——净化是**输入层**变换，特征规范是**表示层**变换；
+    * 依赖不同——净化依赖本地 LLM（可选），特征只依赖向量模型；
+    * 开关语义不同——``enabled=False`` 时整条链路必须退化成改动前的行为，
+      这需要单独一个显式字段来承载，而不是靠某个数值恰好等于默认值。
+    """
+
+    enabled: bool = True  # 总开关：false 时退化为改动前的纯向量/检索路径
+    backend: str = "auto"  # auto | qwen | rule | cache
+    model_path: str | None = None  # 本地 Qwen 权重目录（backend 需要 LLM 时必填）
+    cache_file: str | None = None  # 预计算映射 JSON（backend=cache / auto 优先命中）
+    device: str = "cuda"
+    batch_size: int = 32
+    max_new_tokens: int = 64
+    guard: bool = True  # 极性保真护栏（默认必须开，见陷阱 P1）
+
+    def __post_init__(self):
+        if not isinstance(self.enabled, bool) or not isinstance(self.guard, bool):
+            raise ClusterError("INVALID_PROFILE", "Purification toggles must be booleans", 422)
+        if self.backend not in PURIFICATION_BACKENDS:
+            raise ClusterError("INVALID_PROFILE", "Unknown purification backend", 422)
+        # 声明了需要权重的后端，就必须给出路径；否则配置在语义上不完整，
+        # 应该在加载期失败，而不是等到运行时才发现"无处可加载"。
+        if self.backend == "qwen" and not self.model_path:
+            raise ClusterError("INVALID_PROFILE", "Purification backend 'qwen' requires a model path", 422)
+        if self.backend == "cache" and not self.cache_file:
+            raise ClusterError("INVALID_PROFILE", "Purification backend 'cache' requires a cache file", 422)
+        if not isinstance(self.batch_size, int) or isinstance(self.batch_size, bool) or self.batch_size < 1:
+            raise ClusterError("INVALID_PROFILE", "Purification batch size must be a positive integer", 422)
+        if (
+            not isinstance(self.max_new_tokens, int)
+            or isinstance(self.max_new_tokens, bool)
+            or not 1 <= self.max_new_tokens <= 4096
+        ):
+            raise ClusterError("INVALID_PROFILE", "Purification max_new_tokens is out of range", 422)
 
 
 @dataclass(frozen=True)
@@ -95,6 +145,8 @@ class ResolvedPipelineConfig:
     source_sha256: str | None = None  # 上述文件的校验和
     max_samples: int = 300_000  # 单批样本数上限（与 configs/profiles/*.json 一致）
     calibration_id: str | None = None  # semantic-v1 引用的校准配置标识；legacy 为 None
+    #: SPEAR（spear-v1）的净化口径；其它版本为 None。
+    purification: PurificationSpec | None = None
     capability: dict = field(default_factory=dict)  # 策略能力元信息（批量上限等，可缺省）
 
     @classmethod
@@ -106,7 +158,12 @@ class ResolvedPipelineConfig:
         ``INVALID_PROFILE`` 失败，而不是等到编码之后才发现行为不对。
         """
         try:
-            obj = cls(**{**raw, "features": FeatureSpec(**raw.get("features", {}))})
+            fields = {**raw, "features": FeatureSpec(**raw.get("features", {}))}
+            # purification 是可选子对象：缺省表示"这个 profile 不做净化"（legacy/semantic），
+            # 显式给出时按 PurificationSpec 的构造规则校验。
+            if "purification" in raw and raw["purification"] is not None:
+                fields["purification"] = PurificationSpec(**raw["purification"])
+            obj = cls(**fields)
         except (TypeError, ValueError):
             # 字段名不对/类型不对，统一收敛为领域错误，避免泄漏底层异常细节
             raise ClusterError("INVALID_PROFILE", "Profile fields are invalid", 422) from None
@@ -121,6 +178,20 @@ class ResolvedPipelineConfig:
                 raise ClusterError("INVALID_PROFILE", "semantic-v1 must not use retrieval augmentation", 422)
             if not obj.calibration_id:
                 raise ClusterError("INVALID_PROFILE", "semantic-v1 requires a calibration id", 422)
+            return obj
+        if obj.implementation_version == "spear-v1":
+            # SPEAR 复用 legacy 的算法与特征管道，但必须显式声明净化口径：
+            # "没写 purification" 与 "写了 purification.enabled=false" 是两种不同意图，
+            # 前者属于配置错误，后者才是"关掉净化做对照"。
+            if obj.features.version != "spear-v1":
+                raise ClusterError("INVALID_PROFILE", "spear-v1 requires the spear feature spec", 422)
+            if obj.algorithm.startswith("semantic_"):
+                raise ClusterError("INVALID_PROFILE", "spear-v1 does not support semantic algorithms", 422)
+            if obj.purification is None:
+                raise ClusterError("INVALID_PROFILE", "spear-v1 requires a purification spec", 422)
+            # 与 legacy 同一条约束：要检索近邻就必须有知识库
+            if obj.features.n_results and not obj.knowledge_base_id:
+                raise ClusterError("INVALID_PROFILE", "Retrieval profile needs a knowledge base", 422)
             return obj
 
         if obj.implementation_version != "legacy-v1":

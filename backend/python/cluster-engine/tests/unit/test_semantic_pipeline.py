@@ -290,22 +290,29 @@ def test_capability_table_only_claims_registered_algorithms():
         LEGACY_VERSION,
         SEMANTIC_ALGORITHMS,
         SEMANTIC_VERSION,
+        SPEAR_ALGORITHMS,
+        SPEAR_VERSION,
         list_strategy_versions,
         strategy_for_version,
     )
 
     assert SEMANTIC_ALGORITHMS == REGISTERED
     assert set(SEMANTIC_ALGORITHMS) <= set(ALGORITHMS)
+    # spear-v1 复用 legacy 的算法集合，同样不能声称支持注册表里没有的算法
+    assert set(SPEAR_ALGORITHMS) <= set(ALGORITHMS)
+    assert not set(SPEAR_ALGORITHMS) & set(SEMANTIC_ALGORITHMS)
 
     versions = {entry["implementation_version"]: entry for entry in list_strategy_versions()}
-    assert set(versions) == {LEGACY_VERSION, SEMANTIC_VERSION}
+    assert set(versions) == {LEGACY_VERSION, SEMANTIC_VERSION, SPEAR_VERSION}
     assert list(versions[SEMANTIC_VERSION]["algorithms"]) == list(SEMANTIC_ALGORITHMS)
+    assert list(versions[SPEAR_VERSION]["algorithms"]) == list(SPEAR_ALGORITHMS)
     # legacy 用 None 表示"沿用算法注册表的 API 列表"，不能在这里复制一份算法名
     assert versions[LEGACY_VERSION]["algorithms"] is None
 
     # 分派按版本号查表：未知版本必须报错，不能悄悄落回 legacy 分支
     assert strategy_for_version(LEGACY_VERSION) is None
     assert strategy_for_version(SEMANTIC_VERSION) == "semantic"
+    assert strategy_for_version(SPEAR_VERSION) == "spear"
     with pytest.raises(Exception) as excinfo:
         strategy_for_version("semantic-v9")
     assert getattr(excinfo.value, "code", None) == "INVALID_PROFILE"

@@ -62,6 +62,8 @@ def test_response_serialization_roundtrip():
         "assignments": [{"id": "a", "cluster_id": 0}],
         "warnings": [],
         "elapsed_ms": 3,
+        # spear-v1 新增的可选字段：legacy 路径恒为 None，序列化后必须仍在
+        "purification": None,
     }
     assert ClusteringResponse(**payload).model_dump() == payload
 

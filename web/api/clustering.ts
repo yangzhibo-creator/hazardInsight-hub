@@ -22,6 +22,7 @@ import type {
   ClusteringJobResultData,
   ClusteringJobStatus,
   ClusteringJobSubmitOptions,
+  ClusteringOfflineBaseline,
   ClusteringProfileInfo,
   ClusteringRunOptions,
   ClusteringSampleData,
@@ -95,6 +96,14 @@ export const fetchClusteringAlgorithms = () =>
 
 /** 读取内置示例数据（真实核电工程隐患抽样）。 */
 export const fetchClusteringSample = () => request<ClusteringSampleData>('/sample');
+
+/**
+ * 读取离线基准结果。
+ *
+ * 这是现场演示的兜底入口：实时计算失败或时间不够时，直接展示已归档的
+ * 指标（并如实标注出处与是否全量口径），避免"演示中断"。
+ */
+export const fetchClusteringBaseline = () => request<ClusteringOfflineBaseline>('/baseline');
 
 /** 上传并解析数据文件（CSV / XLSX / JSON / TXT）。 */
 export function uploadClusteringDataset(file: File) {

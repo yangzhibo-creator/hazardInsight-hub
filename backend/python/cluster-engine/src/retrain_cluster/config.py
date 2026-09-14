@@ -4,7 +4,7 @@
 这样既能让运维用环境变量快速改部署参数，又不破坏代码内的默认契约。
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import json
 import os
 from pathlib import Path
@@ -135,6 +135,17 @@ class Catalog:
         # 按文件名排序加载，保证加载顺序稳定（进而让错误信息稳定）
         for path in sorted(settings.profiles_dir.glob("*.json")):
             profile = ResolvedPipelineConfig.from_dict(json.loads(path.read_text(encoding="utf-8")))
+            # 净化用的本地 LLM 与预计算映射按"配置目录"解析相对路径，
+            # 与向量模型 source 的解析口径一致；解析后写回，运行期不再依赖 cwd。
+            if profile.purification is not None:
+                purification = profile.purification
+                resolved = {}
+                if purification.model_path:
+                    resolved["model_path"] = str(resolve_path(settings.models_file.parent, purification.model_path))
+                if purification.cache_file:
+                    resolved["cache_file"] = str(resolve_path(settings.models_file.parent, purification.cache_file))
+                if resolved:
+                    profile = replace(profile, purification=replace(purification, **resolved))
             if profile.profile_id in self.profiles:
                 raise ValueError("Duplicate profile ID")
             # profile 引用的模型必须存在，否则启动即失败（fail fast）
