@@ -304,6 +304,43 @@ def test_same_key_with_different_request_is_a_conflict(service):
         service.submit({"items": items(5), "options": {}}, idempotency_key="k-2")
 
 
+def test_camelcase_reference_database_is_normalized_and_persisted(service):
+    """`knowledgeBaseId` 必须归一到引擎口径，并原样写进请求快照。
+
+    这是「聚类时选择参考数据库」的最后一公里：键不归一，覆盖就**静默失效**——
+    作业照跑，只是悄悄用了 profile 的默认库，结果对不上却没有任何报错。
+    """
+
+    submitted = service.submit(
+        {
+            "items": items(2),
+            "options": {"profileId": "fixture-semantic", "knowledgeBaseId": "kb-2026q1"},
+        }
+    )
+    stored = json.loads(
+        (service.settings.job_store_path / submitted["jobId"] / "request.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert stored["options"]["knowledge_base_id"] == "kb-2026q1"
+    assert "knowledgeBaseId" not in stored["options"]
+
+
+def test_same_key_with_another_reference_database_is_a_conflict(service):
+    """同一把幂等键 + 换了一个参考库 = 另一份请求，必须报冲突而不是复用旧作业。"""
+
+    service.submit({"items": items(4), "options": {"knowledgeBaseId": "kb-a"}}, idempotency_key="k-kb")
+    with pytest.raises(IdempotencyConflictError):
+        service.submit(
+            {"items": items(4), "options": {"knowledgeBaseId": "kb-b"}}, idempotency_key="k-kb"
+        )
+    # 同一个库的重复提交仍然应当拿回同一个作业
+    again = service.submit(
+        {"items": items(4), "options": {"knowledgeBaseId": "kb-a"}}, idempotency_key="k-kb"
+    )
+    assert again["jobId"]
+
+
 def test_capacity_limit_rejects_beyond_queued_plus_running(tmp_path):
     """活跃作业数达到上限后必须拒绝——队列不是无限的，它只是把 OOM 往后推。"""
 

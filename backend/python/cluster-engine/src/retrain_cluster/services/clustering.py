@@ -113,6 +113,53 @@ class ClusteringService:
         # replace 会重新走 PurificationSpec.__post_init__，因此非法覆盖值照样被拦下
         return replace(profile, purification=replace(profile.purification, **changes))
 
+    def with_knowledge_base(self, profile, knowledge_base_id):
+        """把请求级的知识库覆盖应用到已解析的 profile 上（公开给网关复用）。
+
+        「偏差数据库」页面允许在聚类时临时切换检索增强所用的知识库。覆盖只在
+        检索增强 profile（``n_results > 0``）上有意义：对纯向量 profile 传入
+        知识库属于调用方误解，必须显式报错，而不是静默忽略——否则用户以为
+        "换了库"，实际结果一模一样。
+
+        知识库条目数可能少于 profile 声明的近邻数 ``k``（例如演示用的小语料库）。
+        此时必须把 ``k`` 下调为条目数：检索端要求"每条样本恰好返回 k 个近邻"，
+        ``k > count`` 会直接以 INVALID_PROFILE 拒绝，而只取全库更符合直觉。下调
+        只发生在**本次请求**的覆盖 profile 上，不写回配置文件。
+
+        知识库是否存在、是否与模型指纹/维度匹配，交给后面的 :meth:`retriever`
+        （``ChromaRetriever`` 打开索引时做三重校验），这里只读清单里的条目数。
+
+        网关侧调用它是为了让"引擎里的 profile"与"网关本地复现特征用的 profile"
+        是同一份：否则 legacy 路径会出现"标签按新库算、散点按旧库画"的口径分裂。
+        """
+
+        if not knowledge_base_id or knowledge_base_id == profile.knowledge_base_id:
+            return profile
+        if not profile.features.n_results:
+            raise ClusterError(
+                "INVALID_PROFILE", "Knowledge base override requires a retrieval-augmented profile", 422
+            )
+        from dataclasses import replace
+
+        overridden = replace(profile, knowledge_base_id=str(knowledge_base_id))
+        count = self.knowledge_base_count(overridden.knowledge_base_id)
+        if count and count < overridden.features.n_results:
+            overridden = replace(overridden, features=replace(overridden.features, n_results=count))
+        return overridden
+
+    def knowledge_base_count(self, ident):
+        """读取知识库清单里的条目数；读不到返回 0（调用方按"未知"处理）。"""
+
+        if not ident:
+            return 0
+        from ..retrieval.registry import read_manifest_file
+
+        manifest = read_manifest_file(Path(self.settings.artifacts_dir) / "knowledge_bases", ident)
+        try:
+            return int((manifest or {}).get("count") or 0)
+        except (TypeError, ValueError):
+            return 0
+
     def _strategy(self, profile):
         """按实现版本取回 Strategy；legacy profile 返回 None。
 
@@ -182,6 +229,7 @@ class ClusteringService:
         started = time.monotonic()
         profile = self.catalog.profile(request["profile_id"])
         profile = self._with_overrides(profile, request.get("purification"))
+        profile = self.with_knowledge_base(profile, request.get("knowledge_base_id"))
         items = request["items"]
 
         # semantic-v1 有自己的准入规则（允许单条、允许空白项被判 invalid），

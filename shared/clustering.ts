@@ -48,6 +48,19 @@ export interface ClusteringRunOptions {
    * `true/false` 用于现场对照实验，`null`（不传）表示完全按 profile 执行。
    */
   purify?: boolean | null;
+  /**
+   * 检索增强 profile 专用：覆盖 profile 的默认知识库，改用指定的偏差数据库。
+   * `null` / 不传表示按 profile 执行；纯向量 profile 传了会被后端拒绝（422）。
+   */
+  knowledgeBaseId?: string | null;
+  /**
+   * spear-v1 专用：同一次提交额外跑一遍「净化关」作为对照。
+   *
+   * 只有配上数据集自带的类别标签（如 `category`）才有意义——后端用真值算出
+   * 6 项外部指标与差值（主运行 − 净化关），也就是论文里 nr0 与完整框架的对比口径。
+   * 其它 profile 没有净化步骤，勾选会被后端跳过并在 warnings 里说明。
+   */
+  controlPurify?: boolean;
 }
 
 /** 聚类请求体。 */
@@ -350,6 +363,29 @@ export interface ClusteringSummary {
   // —— spear-v1 扩展 ——
   /** 阶段 1（语义净化）的真实状态与前后对照；legacy/semantic 路径为 null。 */
   purification?: ClusteringPurificationReport | null;
+
+  // —— 外部指标（须要数据集自带类别标签，否则整组为 null）——
+  /**
+   * 本次主运行的 6 项指标（ari / vm / fms / ami / hs / cs，
+   * 另带 score / nClusters / noiseRatio 辅助诊断）。
+   */
+  metrics?: ClusteringBaselineMetrics | null;
+  /** 「净化关」对照运行的指标；未勾选对照时为 null。 */
+  controlMetrics?: ClusteringBaselineMetrics | null;
+  /** 对照差值（主运行 − 净化关）与 ARI 相对增益 `ariRelative`。 */
+  metricsComparison?: Record<string, number> | null;
+  /** 真值来源：命中的字段名与带标签条数。 */
+  groundTruth?: ClusteringGroundTruth | null;
+}
+
+/** 外部指标的真值来源说明（字段名 + 覆盖情况）。 */
+export interface ClusteringGroundTruth {
+  /** 命中数据集里的哪个列（如 `category`）。 */
+  field: string;
+  /** 带标签的样本数。 */
+  labeled: number;
+  /** 样本总数。 */
+  total: number;
 }
 
 /** 聚类结果主体。 */
@@ -417,6 +453,12 @@ export interface ClusteringOfflineBaseline {
   verifiedAt?: string | null;
   /** 是否是可复现的全量口径（false 表示抽样，指标不具可比性）。 */
   fullRun: boolean;
+  /** 归档所指的全量口径样本数；用于识别"整份测试集"的历史运行（如 20198 条）。 */
+  fullRunItemCount?: number | null;
+  /** 差值比较的基线行键（如 `nr0_legacy`）。 */
+  baselineKey?: string | null;
+  /** 差值比较的目标行键（如 `spear_purified_retrieval_purification_on`）。 */
+  targetKey?: string | null;
   /** 配置名（如 `nr0` / `spear_purified_retrieval`）→ 指标。 */
   rows: Record<string, ClusteringBaselineMetrics>;
   /** 相对基线的增益（由后端算好，前端不重复造口径）。 */
@@ -535,4 +577,88 @@ export interface ClusteringDatasetReference {
   total: number;
   createdAt?: string | null;
   warnings: string[];
+}
+
+/* ------------------------------------------------------------------ 偏差数据库 */
+
+/**
+ * 一个聚类语义知识库的元信息。
+ *
+ * 对应 cluster-engine `artifacts/knowledge_bases/<id>/manifest.json` 与目录本身；
+ * 字段缺失时按空/0 展示，不臆测（历史库没有的字段本来就不存在）。
+ */
+export interface ClusteringKnowledgeBaseInfo {
+  knowledgeBaseId: string;
+  displayName: string;
+  status: string;
+  verification: string;
+  /** 预处理口径：`raw-lines-v1` / `purified-qwen-v1` / `raw-upload-v1` 等。 */
+  processing: string;
+  entryCount: number;
+  dimension: number;
+  metric: string;
+  modelFingerprint: string;
+  modelId?: string | null;
+  sourceName?: string | null;
+  sourceSha256: string;
+  createdAt?: string | null;
+  sizeBytes: number;
+  /** 是否保留了索引文本快照（决定详情页能否看到条目）。 */
+  hasEntries: boolean;
+  /** 是否保留了上传语料原文快照。 */
+  hasCorpus: boolean;
+}
+
+/** 知识库里的一条文本。 */
+export interface ClusteringKnowledgeBaseEntry {
+  index: number;
+  text: string;
+}
+
+/**
+ * 知识库详情。
+ *
+ * `entriesSource` 说明条目内容从哪里读到，页面必须如实展示：
+ * `snapshot`（构建快照）/ `corpus`（上传语料）/ `source`（历史来源）/ `unavailable`。
+ */
+export interface ClusteringKnowledgeBaseDetail extends ClusteringKnowledgeBaseInfo {
+  entriesSource: string;
+  entryTotal: number;
+  offset: number;
+  limit: number;
+  entries: ClusteringKnowledgeBaseEntry[];
+  warnings: string[];
+}
+
+/** 知识库生成作业的状态快照（与聚类作业同形，便于复用展示组件）。 */
+export interface ClusteringKnowledgeBaseJob {
+  jobId: string;
+  status: string;
+  /** `queued` / `purify` / `embed` / `index` / `done` / `failed`。 */
+  stage: string;
+  processed: number;
+  total: number;
+  message?: string | null;
+  knowledgeBaseId?: string | null;
+  displayName?: string | null;
+  /** `purified`（大模型净化后入库）/ `raw`（原文直接入库）。 */
+  mode?: string | null;
+  modelId?: string | null;
+  sourceName?: string | null;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+  finishedAt?: string | null;
+  error?: { code: string; message: string } | null;
+  warnings: string[];
+  terminal: boolean;
+}
+
+/** 上传语料生成知识库时的选项。 */
+export interface ClusteringKnowledgeBaseBuildOptions {
+  name: string;
+  mode: 'purified' | 'raw';
+  /** 可选：自定义 ASCII 标识；留空则由后端按名称/时间分配。 */
+  ident?: string | null;
+  /** 可选：指定向量模型；留空则沿用检索 profile 的模型。 */
+  modelId?: string | null;
 }

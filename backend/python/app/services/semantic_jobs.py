@@ -68,6 +68,10 @@ _OPTION_ALIASES = {
     "datasetid": "dataset_id",
     "idempotencykey": "idempotency_key",
     "reducemethod": "reduce_method",
+    # 参考数据库（偏差数据库）：漏了这一条时 camelCase 的 `knowledgeBaseId`
+    # 会被原样保留，而下游读的是 `knowledge_base_id`——于是覆盖**静默失效**，
+    # 作业照跑，只是用了 profile 的默认库。这是最难查的一类问题。
+    "knowledgebaseid": "knowledge_base_id",
 }
 
 
@@ -110,18 +114,28 @@ def _normalize_options(options: dict) -> dict:
     return normalized
 
 
-def _request_fingerprint(profile_id: str | None, items: list[dict], dataset_id: str | None = None) -> str:
+def _request_fingerprint(options: dict, items: list[dict], dataset_id: str | None = None) -> str:
     """请求指纹：用来判断"同一个幂等键是不是同一份请求"。
 
-    只用 profile 与 (id, text) 序列，不含 metadata 与耗时类字段——
-    metadata 不参与聚类，把它算进来会让"只改备注"的重复提交被误判为冲突。
+    参与指纹的是**会改变结果**的口径：profile / 算法 / 参考数据库 / 净化开关，
+    以及 (id, text) 序列；不含 metadata 与耗时类字段——metadata 不参与聚类，
+    把它算进来会让"只改备注"的重复提交被误判为冲突。
+
+    参考数据库与净化开关必须参与：它们是"换个库、换条链路"的一级开关，
+    漏掉的话换库重跑会拿回上一个库的作业，用户看到的结果与所选库对不上。
 
     只给了 `datasetId` 时用引用 ID 代替样本：本函数要在**读取数据集之前**就能算出结果，
     否则一个被清理掉的数据集会让"重复提交"抛 404，而不是正常返回原作业。
     """
 
     digest = hashlib.sha256()
-    digest.update((profile_id or "").encode("utf-8"))
+    digest.update((options.get("profile_id") or "").encode("utf-8"))
+    digest.update(b"\x1b")
+    digest.update((options.get("algorithm") or "").encode("utf-8"))
+    digest.update(b"\x1b")
+    digest.update((options.get("knowledge_base_id") or "").encode("utf-8"))
+    digest.update(b"\x1b")
+    digest.update(("purify=on" if options.get("purify") is True else "purify=off" if options.get("purify") is False else "").encode("utf-8"))
     if not items and dataset_id:
         digest.update(b"\x1d")
         digest.update(dataset_id.encode("utf-8"))
@@ -570,7 +584,7 @@ class SemanticJobService:
 
         # 幂等判定放在读取数据集之前：重复提交一个数据集已被清理的请求，
         # 应当拿回原作业，而不是 404。
-        fingerprint = _request_fingerprint(profile_id, raw_items, dataset_id)
+        fingerprint = _request_fingerprint(options, raw_items, dataset_id)
         with self._lock:
             existing = self._find_by_key_locked(key)
             if existing is not None:

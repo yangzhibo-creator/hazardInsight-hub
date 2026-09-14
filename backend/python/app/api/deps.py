@@ -10,6 +10,7 @@ from functools import lru_cache
 
 from app.core.config import get_settings
 from app.services.clustering_service import ClusteringGatewayService
+from app.services.knowledge_base_service import KnowledgeBaseService
 from app.services.semantic_jobs import SemanticJobService
 
 
@@ -29,3 +30,14 @@ def get_job_service() -> SemanticJobService:
     """
 
     return SemanticJobService(get_settings(), service=get_cluster_service())
+
+
+@lru_cache
+def get_knowledge_base_service() -> KnowledgeBaseService:
+    """返回偏差数据库服务单例。
+
+    与聚类服务共享同一个引擎实例：同一份编码器缓存、同一份 Qwen 净化器。
+    各自新建引擎会在显存里并存两份大模型。
+    """
+
+    return KnowledgeBaseService(get_settings(), get_cluster_service())

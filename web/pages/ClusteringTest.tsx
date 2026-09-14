@@ -15,11 +15,18 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import type {
   ClusteringData,
   ClusteringDatasetItem,
+  ClusteringKnowledgeBaseInfo,
   ClusteringResultItem,
 } from '../../shared/clustering';
-import { fetchClusteringSample, runClustering, uploadClusteringDataset } from '../api/clustering';
+import {
+  fetchClusteringSample,
+  fetchKnowledgeBases,
+  runClustering,
+  uploadClusteringDataset,
+} from '../api/clustering';
 import { ClusterFilterBar } from '../components/ClusterFilterBar';
 import { ClusterItemDetail } from '../components/ClusterItemDetail';
+import { KnowledgeBasePicker } from '../components/KnowledgeBasePicker';
 import { FilterHeader, KeywordCells, KeywordSearch, OptionList, SortHeader } from '../components/TableControls';
 import { IconDownload, IconPlay, IconRefresh, IconUpload } from '../components/icons';
 import { clusterColor, clusterTint } from '../lib/clusterColor';
@@ -71,6 +78,9 @@ export function ClusteringTest() {
   const [error, setError] = useState('');
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  /** 本次检索增强使用的知识库；空串表示按 profile 默认。 */
+  const [knowledgeBases, setKnowledgeBases] = useState<ClusteringKnowledgeBaseInfo[]>([]);
+  const [knowledgeBaseId, setKnowledgeBaseId] = useState('');
 
   /**
    * 明细表的筛选/排序/搜索。
@@ -116,6 +126,24 @@ export function ClusteringTest() {
       setProfileId('');
     }
   }, [profileId, selectableProfiles]);
+
+  /** 当前所选 profile（用于判断能力与默认知识库）。 */
+  const selectedProfile = useMemo(
+    () => selectableProfiles.find((profile) => profile.profileId === profileId),
+    [profileId, selectableProfiles],
+  );
+
+  useEffect(() => {
+    setKnowledgeBaseId(selectedProfile?.knowledgeBaseId ?? '');
+  }, [selectedProfile]);
+
+  // 偏差数据库清单：引擎就绪后拉取，失败不阻塞聚类。
+  useEffect(() => {
+    if (!engine.ready) return;
+    void fetchKnowledgeBases()
+      .then(setKnowledgeBases)
+      .catch(() => setKnowledgeBases([]));
+  }, [engine.ready]);
 
   const upload = useCallback(async (file: File) => {
     setBusy(true);
@@ -169,6 +197,7 @@ export function ClusteringTest() {
         algorithm: algorithm || undefined,
         profileId: profileId || undefined,
         visualize: false,
+        knowledgeBaseId: knowledgeBaseId || undefined,
       });
       setResult(next);
       setComparison([]);
@@ -179,7 +208,7 @@ export function ClusteringTest() {
     } finally {
       setRunning(false);
     }
-  }, [items, algorithm, profileId, minItems, setRowClusterFilter]);
+  }, [items, algorithm, profileId, knowledgeBaseId, minItems, setRowClusterFilter]);
 
   const startCompare = useCallback(async () => {
     if (selectedAlgorithms.length < 2) {
@@ -369,30 +398,40 @@ export function ClusteringTest() {
         </div>
 
         {mode === 'single' ? (
-          <div className="clustering-toolbar">
-            <label>
-              算法
-              <select className="select" value={algorithm} disabled={running || !engine.ready} onChange={(event) => setAlgorithm(event.target.value)}>
-                <option value="">自动选择（推荐）</option>
-                {availableAlgorithms.map((name) => <option key={name} value={name}>{name}</option>)}
-              </select>
-            </label>
-            <label>
-              配置档 Profile
-              <select className="select" value={profileId} disabled={running || !engine.ready} onChange={(event) => setProfileId(event.target.value)}>
-                <option value="">自动选择</option>
-                {selectableProfiles.map((profile) => (
-                  <option key={profile.profileId} value={profile.profileId}>
-                    {profile.profileId}
-                    {profile.capability?.supportsSingleItem ? ' · 支持单条' : ''}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <button className="btn btn-primary" disabled={running || !engine.ready || items.length < minItems} onClick={() => void startSingle()}>
-              <IconPlay size={15} />{running ? '执行中…' : '执行聚类'}
-            </button>
-          </div>
+          <>
+            <div className="clustering-toolbar">
+              <label>
+                算法
+                <select className="select" value={algorithm} disabled={running || !engine.ready} onChange={(event) => setAlgorithm(event.target.value)}>
+                  <option value="">自动选择（推荐）</option>
+                  {availableAlgorithms.map((name) => <option key={name} value={name}>{name}</option>)}
+                </select>
+              </label>
+              <label>
+                配置档 Profile
+                <select className="select" value={profileId} disabled={running || !engine.ready} onChange={(event) => setProfileId(event.target.value)}>
+                  <option value="">自动选择</option>
+                  {selectableProfiles.map((profile) => (
+                    <option key={profile.profileId} value={profile.profileId}>
+                      {profile.profileId}
+                      {profile.capability?.supportsSingleItem ? ' · 支持单条' : ''}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <button className="btn btn-primary" disabled={running || !engine.ready || items.length < minItems} onClick={() => void startSingle()}>
+                <IconPlay size={15} />{running ? '执行中…' : '执行聚类'}
+              </button>
+            </div>
+            {/* 参考数据库：与展示页同一个控件，始终可见；不生效时说明原因。 */}
+            <KnowledgeBasePicker
+              knowledgeBases={knowledgeBases}
+              value={knowledgeBaseId}
+              onChange={setKnowledgeBaseId}
+              profile={selectedProfile}
+              disabled={running}
+            />
+          </>
         ) : (
           <>
             <div className="clustering-check-grid">
@@ -414,6 +453,13 @@ export function ClusteringTest() {
               </button>
               {progress && <span className="small muted" role="status">{progress}</span>}
             </div>
+            {/* 对比模式按各算法自身的 profile 执行，参考数据库不参与；
+                用户若已选了库，必须说明"这里不会用它"，而不是默默忽略。 */}
+            {knowledgeBaseId && (
+              <p className="small muted">
+                多算法对比按各算法自身的 profile 执行，<strong>不指定参考数据库</strong>；需要指定库请切回「单次运行」。
+              </p>
+            )}
           </>
         )}
       </section>

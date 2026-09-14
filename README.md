@@ -21,7 +21,7 @@
 - **历史相似案例 TOP3**：相似度可视化 + 历史定级 + 历史整改措施；
 - **原图 bbox 标注**：等级配色方框、编号标签、点击联动、隐藏标注、导出「隐患说明图」PNG；
 - **目录导航（三级）**：一级目录为 `隐患发现 · 隐患管理 · 隐患知识库 · 偏差聚类 · 设置`；二级分组沿用原有功能划分（如「隐患管理」下的隐患识别 / 历史记录 / 隐患测试 / 隐患防控），三级为具体页面。绑定单个页面的分组渲染为直接跳转，不再多套一层；
-- **聚类分析（聚类展示 / 聚类测试）**：对隐患文本做无监督聚类，输出簇结构、关键词、代表样本与二维（PCA）散点分布；算法与向量化由独立的 Python 聚类服务（`cluster-engine`，11 种算法 / 20 个 profile / 本地 BGE 中文向量模型）提供，前端不做任何算法近似；「聚类测试」页可查看服务就绪状态、算法与 profile 可用性，并对同一批数据做多算法横向对比；
+- **聚类分析（聚类展示 / 聚类测试 / 偏差数据库）**：对隐患文本做无监督聚类，输出簇结构、关键词、代表样本与二维（PCA）散点分布；算法与向量化由独立的 Python 聚类服务（`cluster-engine`，11 种算法 / 20 个 profile / 本地 BGE 中文向量模型）提供，前端不做任何算法近似；「聚类测试」页可查看服务就绪状态、算法与 profile 可用性，并对同一批数据做多算法横向对比；「偏差数据库」页可查看/生成检索增强用的语义知识库，并在聚类时选择使用哪一个；
 - **人工干预**：修改定级、编辑隐患描述、编辑整改建议（立即/整改/预防三类）；
 - **隐患发现**：固定摄像头抓拍识别 + 具身智能机器人自动巡检（多点位画面分析、进度与结果汇总），一键转入隐患台账；
 - **隐患防控**：隐患台账闭环管理（排查-登记-整改-复查-销号），支持来源、等级、状态流转、责任人/时限与台账导出；
@@ -354,7 +354,7 @@ hazardInsight-hub/
 │   ├── scripts/             # 离线脚本（示例数据构建等）
 │   └── tests/               # pytest（单元测试 + 默认跳过的 integration 端到端）
 ├── web/
-│   ├── pages/               # 智能识别 / 隐患发现 / 隐患防控 / 定级规则 / 知识图谱 / 知识库 / 记录 / 设置 / 聚类展示 / 聚类测试
+│   ├── pages/               # 智能识别 / 隐患发现 / 隐患防控 / 定级规则 / 知识图谱 / 知识库 / 记录 / 设置 / 聚类展示 / 聚类测试 / 偏差数据库
 │   ├── components/          # ImagePanel、ImageAnnotator、HazardCard、EvidenceDrawer、ClusterScatter…
 │   ├── lib/                 # API 客户端、localStorage（记录/台账/主题）、发现设备源、图谱布局、图片工具、hash 路由
 │   ├── api/                 # 领域接口客户端（clustering.ts 等，统一拆封 success/data/error）
@@ -396,7 +396,11 @@ hazardInsight-hub/
 | `GET /api/clustering/algorithms` | 引擎暴露的聚类算法及其依赖可用性 |
 | `GET /api/clustering/sample` | 内置示例数据（真实核电工程隐患抽样 50 条） |
 | `POST /api/clustering/datasets` | `multipart/form-data`：`file=<CSV/XLSX/JSON/TXT>` → 解析为聚类样本（自动识别文本列、ID 去重、文本清洗） |
-| `POST /api/clustering/run` | 执行一次聚类 → 统计 + 簇摘要（关键词/代表样本/元数据分布）+ 逐条归属 + 二维 PCA 坐标 |
+| `POST /api/clustering/run` | 执行一次聚类 → 统计 + 簇摘要（关键词/代表样本/元数据分布）+ 逐条归属 + 二维 PCA 坐标；`options.knowledgeBaseId` 可覆盖检索增强 profile 的知识库 |
+| `GET /api/clustering/knowledge-bases` | 偏差数据库列表（条数、维度、生成方式、创建时间、大小与是否有条目快照） |
+| `GET /api/clustering/knowledge-bases/{id}` | 知识库详情 + 分页条目（`?offset=&limit=`）；`entriesSource` 说明条目从快照/语料/历史来源读到，或不可用 |
+| `POST /api/clustering/knowledge-bases` | `multipart/form-data`：`file=<TXT/CSV/XLSX/JSON>`、`name`、`mode=purified\|raw`、可选 `ident`/`model_id` → 提交异步生成任务，返回 `jobId` |
+| `GET /api/clustering/knowledge-bases/jobs` / `GET /api/clustering/knowledge-bases/jobs/{jobId}` | 知识库生成任务列表 / 轮询进度（`stage`、`processed/total`、`terminal`） |
 | `GET /api/health` | Python 聚类服务的探针（与 `/api/clustering/health` 同源路由，便于规范与前端代理各取所需） |
 
 ## 八、API 数据结构要点
@@ -451,10 +455,31 @@ web/pages/Clustering*.tsx
 | --- | --- | --- | --- |
 | 聚类展示 | `/clustering/overview` | 演示 / 汇报 | 一键对示例或上传数据聚类；统计卡、二维散点图（可点击图例高亮簇）、簇卡片（关键词 / 元数据分布 / 代表样本）、样本归属明细与详情抽屉 |
 | 聚类测试 | `/clustering/test` | 工程验证 | 服务与引擎就绪状态、算法与 profile 可用性清单、手工输入小批量文本做冒烟测试、单次运行逐条结果 + CSV 导出、**多算法横向对比**（簇数 / 噪声 / 耗时 / 向量缓存） |
+| 偏差数据库 | `/clustering/knowledge-base` | 知识库运维 | 查看现有检索知识库与条目、上传语料由大模型净化（或原文）生成新库并轮询进度；聚类页据此选择本次使用的库 |
 
 两页共享 `web/lib/useClusterEngine.ts`（只读元信息），各自独立持有执行状态；簇颜色由 `web/lib/clusterColor.ts` 按 `cluster_id` 稳定分配，保证散点图、图例、卡片、表格同色。
 
-### 4. 接口约定
+### 4. 偏差数据库（检索增强知识库）
+
+检索增强（nr1 / `spear_purified_retrieval`）依赖一个**语义知识库**：把一批偏差文本编码成向量写入 ChromaDB，聚类时按近邻检索补偿表示。「偏差数据库」页面（`/clustering/knowledge-base`）把它的生命周期搬到界面上：
+
+| 能力 | 说明 |
+| --- | --- |
+| 查看现有库 | 列出 `cluster-engine/artifacts/knowledge_bases/<id>/` 下的全部库（条数、维度、生成方式、创建时间、大小），并分页查看库内条目 |
+| 上传语料生成 | `TXT`（每行一条）/ `CSV` / `XLSX` / `JSON`；`purified` 模式由本地 Qwen 逐条语义净化后入库，`raw` 模式原文直接入库；提交后异步执行、页面轮询进度 |
+| 聚类时选择 | 「聚类展示 / 聚类测试」页在所选 profile 为检索增强时出现「偏差数据库」下拉，把 `knowledgeBaseId` 随请求下发，覆盖 profile 的默认库 |
+
+工程约定：
+
+- 知识库本体写在 **cluster-engine** 的 `artifacts/knowledge_bases/<id>/`（`manifest.json` + `index/` + `entries.jsonl`）；网关只存生成任务记录（`backend/python/artifacts/knowledge_bases/`）；
+- 构建时额外落 `entries.jsonl`（写入索引的真实文本）与 `corpus.txt`（上传原文）旁路快照 —— ChromaDB 只存向量，没有快照就只能看到条目数、看不到内容；历史库若没有快照，页面会**如实说明**"只能看元信息"；
+- 知识库标识必须匹配 `[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}`；中文名称写进清单的 `display_name`，标识按名称 slug 或时间戳自动分配；
+- 生成是**异步作业**：Qwen 逐条净化两万条语料需要一到三小时，提交立刻返回 `jobId`，中途刷新页面仍能看到进度；服务重启会把遗留的"生成中"标记为失败，而不是让它永远转圈；
+- 同一时刻只允许一个生成任务（GPU/显存约束），重复提交返回 429；
+- 选择的知识库条目数少于 profile 声明的近邻数 `k` 时（如演示用小语料），本次请求会把 `k` 下调为条目数，并在结果告警里写明 —— 不静默改变检索口径；
+- 纯向量 profile 不吃知识库：传入 `knowledgeBaseId` 会被显式拒绝（`INVALID_PROFILE`），而不是静默忽略。
+
+### 5. 接口约定
 
 - 所有接口返回统一包裹 `{ success, data, error }`；失败时 `error` 含 `code`（如 `UNSUPPORTED_FILE`、`PROFILE_UNAVAILABLE`、`SERVICE_BUSY`、`CLUSTERING_TIMEOUT`）与面向用户的中文 `message`，前端只需一套错误分支；
 - Python 内部字段为 snake_case，对外统一序列化为 camelCase（Pydantic `alias_generator`），与 `shared/clustering.ts` 逐字段一致，前端不做任何键名转换；
@@ -462,7 +487,7 @@ web/pages/Clustering*.tsx
 - 数据上限：单次 ≤ 30 万条样本、单条文本 ≤ 4000 字符、上传文件 ≤ 200 MB；聚类墙钟超时默认 3600 秒。
   - 注意：**放开个数限制不等于所有算法都能跑满**。层次聚类（agglomerative / affinity_propagation）是 O(n²) 时空复杂度，30 万条会内存溢出；实际能吃满量级的是 dbscan / hdbscan / birch / leader / canopy 等线性或近线性算法。
 
-### 5. 运行与测试
+### 6. 运行与测试
 
 环境准备、启动命令与全部 npm 脚本见「**三、快速开始**」的 3.4 / 3.6 小节，聚类相关的常用命令：
 
@@ -474,7 +499,7 @@ npm run test:py -- -m integration   # 端到端（需本地向量模型，会真
 
 `backend/python/tests/` 覆盖：契约（camelCase 双向兼容、强校验、自由字典键名不被改写）、文本清洗、CSV/JSON/TXT/XLSX 解析（含 GBK、BOM、损坏文件）、簇摘要（分组、置信度归一、代表样本、元数据分布、长度不一致报错）、示例数据与上传解析、以及端到端接口。
 
-### 6. 来源与数据声明
+### 7. 来源与数据声明
 
 - 聚类算法层来自既有的 Python 聚类工程（`retrain-cluster`），迁移为本项目的 `backend/python/cluster-engine`，**未重写算法**；网关与其契约层为本次新增；
 - 内置示例数据由 `backend/python/scripts/build_sample_dataset.py` 从本仓库的隐患抽样 CSV 生成（50 条，含隐患级别 / 分类 / 排查类型 / 作业区域等业务字段），仅用于演示；

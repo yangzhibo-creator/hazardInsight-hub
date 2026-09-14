@@ -343,6 +343,78 @@
 .clustering-job-text { overflow-wrap: anywhere; color: var(--text-1); }
 .clustering-pager { display: flex; align-items: center; gap: 12px; margin-top: 12px; }
 
+/* ---------- 历史测试记录（列表内就地展开） ---------- */
+/*
+ * 用 grid 让每条记录的各列对齐；窄屏交给外层横向滚动，而不是把列挤成换行的碎块。
+ * 展开区直接跟在被点击的行下面，不弹抽屉、不跳页——"点哪条看哪条"。
+ */
+.clustering-history-scroll { overflow-x: auto; margin-top: 12px; }
+.clustering-history {
+  display: grid;
+  grid-template-columns: 22px 152px 78px minmax(150px, 1.3fr) 74px 92px minmax(110px, 1fr) minmax(110px, 1fr);
+  align-items: center; gap: 10px; min-width: 900px;
+}
+.clustering-history-head { padding: 0 12px 6px; font-size: 11.5px; font-weight: 600; color: var(--text-3); }
+.clustering-history-list {
+  list-style: none; margin: 0; padding: 0;
+  border: 1px solid var(--border); border-radius: 10px; overflow: hidden;
+}
+.clustering-history-item + .clustering-history-item { border-top: 1px solid var(--border); }
+.clustering-history-item.is-open { background: var(--surface-2); }
+.clustering-history-row {
+  width: 100%; padding: 9px 12px; border: 0; background: transparent;
+  font: inherit; font-size: 12.5px; color: var(--text-1); text-align: left; cursor: pointer;
+}
+.clustering-history-row:hover { background: var(--surface-2); }
+.clustering-history-row:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
+.clustering-history-caret { display: inline-flex; color: var(--text-3); }
+.clustering-history-profile { color: var(--text-2); overflow-wrap: anywhere; }
+.clustering-history-run { color: var(--text-3); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.clustering-history-flag { color: var(--text-3); font-size: 11.5px; overflow-wrap: anywhere; }
+.clustering-status.is-warn { background: var(--warn-bg); color: var(--warn-text); }
+.clustering-history-detail { padding: 0 12px 14px 44px; }
+.clustering-history-stats { margin-top: 4px; border: 1px solid var(--border); border-radius: 10px; }
+.clustering-history-clusters { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 12px 0; }
+/* 基准指标区：主运行 / 对照 / 差值三列，表格沿用聚类表格的横向滚动 */
+.clustering-benchmark { margin-top: 16px; }
+.clustering-benchmark .clustering-toolbar { align-items: center; gap: 10px; margin-bottom: 8px; }
+.clustering-benchmark .clustering-table-title { font-size: 13.5px; }
+
+/* ---------- 参考数据库（偏差数据库）选择器 ---------- */
+/*
+ * 与算法 / profile 同处一块「运行选项」区，但用一条浅底横条单独成行：
+ * 它是"这次拿哪个库检索"的一级开关，混在其它 label 里最容易被忽略。
+ */
+.kb-picker {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  margin-top: 12px; padding: 10px 12px;
+  border: 1px solid var(--border); border-radius: 12px;
+  background: var(--surface-2);
+}
+.kb-picker.is-active { border-color: var(--primary-100); background: var(--primary-050); }
+.kb-picker-field { display: flex; flex-direction: column; gap: 5px; font-size: 12.5px; color: var(--text-2); }
+.kb-picker-field .select { min-width: 280px; height: 34px; }
+.kb-picker-title { display: flex; align-items: center; gap: 6px; font-weight: 600; color: var(--navy); }
+.kb-picker-badge {
+  height: 18px; padding: 0 7px; border-radius: 99px; font-size: 10.5px; font-weight: 600;
+  display: inline-flex; align-items: center;
+  background: var(--surface-3); color: var(--text-3);
+}
+.kb-picker-badge.is-on { background: var(--primary-100); color: var(--primary-700); }
+.kb-picker-hint { flex: 1; min-width: 240px; margin: 0; font-size: 12px; color: var(--text-2); line-height: 1.7; }
+.kb-picker-hint.is-muted { color: var(--text-3); }
+
+/* ---------- 执行入口（同步 / 异步并排） ---------- */
+/*
+ * 两个提交按钮与运行选项同处一卡：选项在上面，提交紧接着在下面，
+ * 不再出现"参数选完了，按钮还在两个屏幕之外"。
+ */
+.clustering-actions {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border);
+}
+.clustering-actions .btn { flex: none; }
+
 /* ---------- 响应式 ---------- */
 @media (max-width: 1180px) {
   .clustering-stat-grid { grid-template-columns: repeat(3, minmax(90px, 1fr)); }
@@ -352,4 +424,6 @@
   .clustering-toolbar { align-items: stretch; }
   .clustering-toolbar .select { min-width: 100%; }
   .clustering-cluster-grid { grid-template-columns: 1fr; }
+  .kb-picker-field .select { min-width: 100%; }
+  .kb-picker { align-items: stretch; }
 }

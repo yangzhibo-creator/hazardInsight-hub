@@ -84,6 +84,24 @@ class GatewaySettings(BaseSettings):
     #: 因为作业在提交时就把样本快照落盘了）。
     dataset_history_limit: int = 20
 
+    # ------------------------------------------------------------------ 偏差数据库
+
+    #: 知识库生成作业记录的根目录（相对 backend/python 解析）。
+    #: 知识库本体写在 cluster-engine 的 `artifacts/knowledge_bases/<id>/`，
+    #: 这里只存"哪次上传、跑到哪一步、生成了哪个库"这类任务态。
+    knowledge_base_store: Path = Field(default=Path("artifacts") / "knowledge_bases")
+
+    #: 单个知识库允许的条目上限。净化是逐条 LLM 推理，上限决定了单次生成的时间上界，
+    #: 不设限会让"上传一个 30 万行的大文件"把现场演示拖成数小时。
+    knowledge_base_max_items: int = 200_000
+
+    #: 知识库生成作业的保留数量（新→旧，超出后清理最旧的终态作业）。
+    knowledge_base_history_limit: int = 20
+
+    #: 生成作业的净化分块大小：每处理完一块就落一次进度。
+    #: 太大会让进度长时间不动，太小会放大调度开销。
+    knowledge_base_purify_chunk: int = 64
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_prefix="HAZARD_",
@@ -118,6 +136,12 @@ class GatewaySettings(BaseSettings):
         """作业与数据集产物的绝对根目录。"""
 
         return self.resolve_path(self.job_store)
+
+    @property
+    def knowledge_base_store_path(self) -> Path:
+        """知识库生成作业记录的绝对根目录。"""
+
+        return self.resolve_path(self.knowledge_base_store)
 
 
 @lru_cache

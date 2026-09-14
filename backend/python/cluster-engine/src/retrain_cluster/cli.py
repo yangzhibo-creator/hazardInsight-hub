@@ -6,6 +6,7 @@
 
 import argparse
 from dataclasses import asdict
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 import sys
@@ -121,6 +122,11 @@ def main(argv=None):
                     model_hash,
                     model["dimension"],
                     args.input,
+                    # 让 CLI 构建的库与页面构建的库在"偏差数据库"列表里有同样的溯源信息
+                    display_name=args.id,
+                    source_name=Path(args.input).name,
+                    model_id=args.model_id,
+                    created_at=datetime.now(timezone.utc).isoformat(),
                 )
             elif args.command == "tune":
                 from .services.experiments import ExperimentService

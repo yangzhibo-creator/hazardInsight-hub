@@ -22,6 +22,10 @@ import type {
   ClusteringJobResultData,
   ClusteringJobStatus,
   ClusteringJobSubmitOptions,
+  ClusteringKnowledgeBaseBuildOptions,
+  ClusteringKnowledgeBaseDetail,
+  ClusteringKnowledgeBaseInfo,
+  ClusteringKnowledgeBaseJob,
   ClusteringOfflineBaseline,
   ClusteringProfileInfo,
   ClusteringRunOptions,
@@ -201,4 +205,41 @@ export function fetchClusteringJobItems(
 export const fetchClusteringDatasets = (limit = 20) =>
   request<{ datasets: ClusteringDatasetReference[] }>(`/datasets?limit=${limit}`).then(
     (data) => data.datasets,
+  );
+
+/* ------------------------------------------------------------------ 偏差数据库 */
+
+/** 列出已有知识库（元信息，不含条目内容）。 */
+export const fetchKnowledgeBases = () =>
+  request<{ knowledgeBases: ClusteringKnowledgeBaseInfo[] }>('/knowledge-bases').then(
+    (data) => data.knowledgeBases,
+  );
+
+/** 读取知识库详情与一页条目。 */
+export const fetchKnowledgeBaseDetail = (knowledgeBaseId: string, offset = 0, limit = 50) => {
+  const params = new URLSearchParams({ offset: String(offset), limit: String(limit) });
+  return request<ClusteringKnowledgeBaseDetail>(
+    `/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}?${params.toString()}`,
+  );
+};
+
+/** 上传语料并提交一次知识库生成任务（异步，返回 jobId）。 */
+export function buildKnowledgeBase(file: File, options: ClusteringKnowledgeBaseBuildOptions) {
+  const body = new FormData();
+  body.append('file', file);
+  body.append('name', options.name);
+  body.append('mode', options.mode);
+  if (options.ident) body.append('ident', options.ident);
+  if (options.modelId) body.append('model_id', options.modelId);
+  return request<ClusteringKnowledgeBaseJob>('/knowledge-bases', { method: 'POST', body });
+}
+
+/** 查询知识库生成进度；`terminal=true` 时停止轮询。 */
+export const fetchKnowledgeBaseJob = (jobId: string) =>
+  request<ClusteringKnowledgeBaseJob>(`/knowledge-bases/jobs/${encodeURIComponent(jobId)}`);
+
+/** 列出知识库生成任务（新→旧）。 */
+export const fetchKnowledgeBaseJobs = (limit = 20) =>
+  request<{ jobs: ClusteringKnowledgeBaseJob[] }>(`/knowledge-bases/jobs?limit=${limit}`).then(
+    (data) => data.jobs,
   );

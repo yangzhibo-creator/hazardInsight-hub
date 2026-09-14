@@ -2,12 +2,17 @@
   "source": "预演机 GPU 全量实测（RTX PRO 6000 Blackwell / torch 2.8.0+cu129 / transformers 5.17.0 / bge-large-zh-v1.5；测试集全量 20,198 条 / 353 类）",
   "verified_at": "2026-09-14",
   "full_run": true,
+  "full_run_item_count": 20198,
   "baseline_key": "nr0_legacy",
   "target_key": "spear_purified_retrieval_purification_on",
   "rows": {
     "nr0_legacy": {
       "ari": 0.1545,
       "vm": 0.5903,
+      "fms": 0.16,
+      "ami": 0.45,
+      "hs": 0.585,
+      "cs": 0.595,
       "n_clusters": 271
     },
     "nr1_legacy_purification_off": {
@@ -23,11 +28,19 @@
     "spear_purified_retrieval_purification_on": {
       "ari": 0.2465,
       "vm": 0.6492,
+      "fms": 0.285,
+      "ami": 0.588,
+      "hs": 0.669,
+      "cs": 0.702,
       "n_clusters": 260
     },
     "paper_report": {
       "ari": 0.281,
       "vm": 0.685,
+      "fms": 0.285,
+      "ami": 0.588,
+      "hs": 0.669,
+      "cs": 0.702,
       "n_clusters": 231
     }
   },
@@ -39,6 +52,7 @@
     "极性护栏实测：裸 Qwen 会把「…名称与系统不一致」净化为「…名称与系统一致」，护栏拦下并改用只删不改的规则兜底；全量运行中护栏命中 1,471/20,198（7.28%）。",
     "小环境差异：论文归档口径为 nr0 0.154342 / nr1 0.280819，预演机早期记录为 0.1528 / 0.2705，本表为同一套参数在本次环境下的复现；数值差异来自环境而非配置。",
     "截断高度与样本量强相关：本表是全量 20,198 条口径，抽样运行的指标不具可比性。",
-    "FMS / AMI / HS / CS 未随本表归档；现场可用 output_bge_large 下的完整评测文件读取。"
+    "FMS / AMI / HS / CS 四列此前未随本表归档，现按论文《SPEAR》表 tab:algo_effect 的 Agglomerative 列补齐：nr0（0.160 / 0.450 / 0.585 / 0.595）、完整框架 nr-1（0.285 / 0.588 / 0.669 / 0.702），paper_report 行沿用 nr-1 口径。这四列是**论文报告值**，与本表其余「预演机实测」列的运行环境不同，两者不应逐位比较；需要现场实测请用「提交后台作业」并勾选「同时跑未净化对照」。",
+    "历史整份测试集的两次 20,198 条作业（spear_purified_retrieval）没有留下外部指标产物；界面在展开这些作业时会回退显示本归档对比，并明确标注「论文归档基准，本作业未计算指标」。"
   ]
 }

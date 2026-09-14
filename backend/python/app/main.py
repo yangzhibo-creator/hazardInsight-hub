@@ -20,9 +20,10 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.clustering import router as clustering_router
-from app.api.deps import get_cluster_service, get_job_service
+from app.api.deps import get_cluster_service, get_job_service, get_knowledge_base_service
 from app.api.error_handlers import register_error_handlers
 from app.api.health import router as health_router
+from app.api.knowledge_bases import router as knowledge_bases_router
 from app.core.config import get_settings
 from app.core.logger import get_logger
 
@@ -47,6 +48,8 @@ def create_app() -> FastAPI:
         get_cluster_service().preload()
         jobs = get_job_service()
         jobs.start()
+        # 上次进程遗留的"生成中"知识库任务不会自己复活，标记为失败而不是让它永远转圈
+        get_knowledge_base_service().recover_stale_jobs()
         try:
             yield
         finally:
@@ -87,6 +90,9 @@ def create_app() -> FastAPI:
 
     register_error_handlers(app)
 
+    # 偏差数据库路由：/api/clustering/knowledge-bases/*
+    # 放在聚类路由之前注册，避免将来新增的聚类通配路由抢先匹配到该前缀。
+    app.include_router(knowledge_bases_router, prefix="/api")
     # 聚类路由：/api/clustering/*
     app.include_router(clustering_router, prefix="/api")
     # 健康检查：/api/health（规范要求）与 /api/clustering/health（便于前端代理）

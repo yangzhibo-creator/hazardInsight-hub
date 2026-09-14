@@ -57,6 +57,17 @@ class RunOptions(ApiModel):
         default=None,
         description="spear-v1 专用：true/false 覆盖 profile 的净化开关；null 表示按 profile 执行",
     )
+    knowledge_base_id: str | None = Field(
+        default=None,
+        description="检索增强 profile 专用：覆盖 profile 默认知识库，改用指定的偏差数据库；null 表示按 profile 执行",
+    )
+    control_purify: bool = Field(
+        default=False,
+        description=(
+            "spear-v1 专用：同一次提交额外跑一遍「净化关」作为对照，配合数据集类别标签计算 6 项外部指标与差值；"
+            "其它 profile 没有净化步骤，会被跳过并在 warnings 里说明"
+        ),
+    )
 
 
 class PurificationStatusInfo(ApiModel):
@@ -322,6 +333,19 @@ class ClusterSummary(ApiModel):
     postprocess: dict[str, Any] | None = None
     # —— spear-v1 扩展：阶段 1（语义净化）的真实状态与前后对照 ——
     purification: PurificationReportInfo | None = None
+    # —— 外部指标：数据集带类别标签时才有；键为 ari/vm/fms/ami/hs/cs/score/nClusters/noiseRatio ——
+    metrics: dict[str, Any] | None = Field(
+        default=None, description="本次主运行的 6 项外部指标（需要数据集带类别标签）"
+    )
+    control_metrics: dict[str, Any] | None = Field(
+        default=None, description="「净化关」对照运行的指标；未勾选对照时为 null"
+    )
+    metrics_comparison: dict[str, float] | None = Field(
+        default=None, description="对照差值（主运行 − 净化关对照）与 ARI 相对增益"
+    )
+    ground_truth: dict[str, Any] | None = Field(
+        default=None, description="真值来源：命中的字段名与带标签条数"
+    )
 
 
 class ClusteringData(ApiModel):
@@ -468,6 +492,94 @@ class DatasetListData(ApiModel):
     datasets: list[DatasetReferenceData] = Field(default_factory=list)
 
 
+# ------------------------------------------------------------------ 偏差数据库
+
+
+class KnowledgeBaseInfo(ApiModel):
+    """一个知识库的元信息（列表与详情共用）。
+
+    字段全部来自构建时落盘的 ``manifest.json`` 或目录本身，不做推断：
+    拿不到就留空/为 0，由前端展示"未知"，不编造。
+    """
+
+    knowledge_base_id: str
+    display_name: str
+    status: str
+    verification: str = "unknown"
+    processing: str = "unknown"
+    entry_count: int = 0
+    dimension: int = 0
+    metric: str = ""
+    model_fingerprint: str = ""
+    model_id: str | None = None
+    source_name: str | None = None
+    source_sha256: str = ""
+    created_at: str | None = None
+    size_bytes: int = 0
+    has_entries: bool = Field(default=False, description="是否保留了索引文本快照")
+    has_corpus: bool = Field(default=False, description="是否保留了上传语料原文快照")
+
+
+class KnowledgeBaseEntry(ApiModel):
+    """知识库里的一条文本（``index`` 为库内序号，从 0 开始）。"""
+
+    index: int
+    text: str
+
+
+class KnowledgeBaseDetailData(KnowledgeBaseInfo):
+    """知识库详情：元信息 + 一页条目内容。"""
+
+    entries_source: str = Field(
+        default="unavailable",
+        description="snapshot / corpus / source / unavailable，说明条目内容从哪里读到的",
+    )
+    entry_total: int = 0
+    offset: int = 0
+    limit: int = 50
+    entries: list[KnowledgeBaseEntry] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
+class KnowledgeBaseListData(ApiModel):
+    """知识库列表。"""
+
+    knowledge_bases: list[KnowledgeBaseInfo] = Field(default_factory=list)
+
+
+class KnowledgeBaseBuildJob(ApiModel):
+    """知识库生成作业的状态快照。
+
+    ``processed / total`` 是**当前阶段**的进度（净化或编码），不是全局百分比：
+    阶段切换时 ``stage`` 变化、``processed`` 归零重计——这比编一个加权百分比
+    更诚实，前端也更容易解释。
+    """
+
+    job_id: str
+    status: str = Field(description="queued / running / succeeded / failed")
+    stage: str = Field(default="queued", description="queued / purify / embed / index / done")
+    processed: int = 0
+    total: int = 0
+    message: str | None = None
+    knowledge_base_id: str | None = None
+    display_name: str | None = None
+    mode: str | None = Field(default=None, description="purified / raw")
+    model_id: str | None = None
+    source_name: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+    finished_at: str | None = None
+    error: JobError | None = None
+    warnings: list[str] = Field(default_factory=list)
+    terminal: bool = Field(default=False, description="是否已进入终态，前端据此停止轮询")
+
+
+class KnowledgeBaseBuildJobListData(ApiModel):
+    """知识库生成作业列表（新→旧）。"""
+
+    jobs: list[KnowledgeBaseBuildJob] = Field(default_factory=list)
+
+
 class ErrorInfo(ApiModel):
     """统一错误结构。"""
 
@@ -528,7 +640,15 @@ class BaselineData(ApiModel):
     source: str
     verified_at: str | None = None
     full_run: bool = True
+    full_run_item_count: int | None = Field(
+        default=None,
+        description="归档所指的全量口径样本数；用于识别整份测试集的历史运行（如 20198 条）",
+    )
     rows: dict[str, BaselineMetrics] = Field(default_factory=dict)
+    baseline_key: str | None = Field(
+        default=None, description="差值比较的基线行键；前端据此从 rows 里取对比双方"
+    )
+    target_key: str | None = Field(default=None, description="差值比较的目标行键")
     comparison: dict[str, float] | None = None
     table: str | None = None
     notes: list[str] = Field(default_factory=list)
@@ -549,6 +669,12 @@ ClusteringJobResultEnvelope = Envelope[ClusteringJobResultData]
 JobItemsEnvelope = Envelope[JobItemsData]
 JobFilterOptionsEnvelope = Envelope[JobFilterOptions]
 DatasetListEnvelope = Envelope[DatasetListData]
+
+#: 偏差数据库相关响应（列表 / 详情 / 生成作业）。
+KnowledgeBaseListEnvelope = Envelope[KnowledgeBaseListData]
+KnowledgeBaseDetailEnvelope = Envelope[KnowledgeBaseDetailData]
+KnowledgeBaseBuildJobEnvelope = Envelope[KnowledgeBaseBuildJob]
+KnowledgeBaseBuildJobListEnvelope = Envelope[KnowledgeBaseBuildJobListData]
 
 
 class EngineStatus(ApiModel):

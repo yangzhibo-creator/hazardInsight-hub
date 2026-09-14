@@ -31,7 +31,7 @@ export interface MenuSection {
  *     └ 隐患识别（分组）
  *         └ 图片智能识别（页面）
  *   隐患发现 / 隐患知识库 / 偏差聚类（目录，无二级分组，页面直接挂载）
- *     └ 固定摄像头抓隐患、安全知识库、聚类展示 …（页面）
+ *     └ 固定摄像头抓隐患、安全知识库、聚类展示、偏差数据库 …（页面）
  * 分组只含单个页面时渲染为直接跳转项，不再多套一层。
  */
 const NAV: MenuSection[] = [
@@ -73,6 +73,7 @@ const NAV: MenuSection[] = [
     items: [
       { id: 'clustering-overview', label: '聚类展示', route: '/clustering/overview' },
       { id: 'clustering-test', label: '聚类测试', route: '/clustering/test' },
+      { id: 'clustering-knowledge-base', label: '偏差数据库', route: '/clustering/knowledge-base' },
     ],
   },
   {

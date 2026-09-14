@@ -9,6 +9,7 @@ import { ClusteringOverview } from './pages/ClusteringOverview';
 import { ClusteringTest } from './pages/ClusteringTest';
 import { Graph } from './pages/Graph';
 import { Knowledge } from './pages/Knowledge';
+import { KnowledgeBase } from './pages/KnowledgeBase';
 import { ModelConfig } from './pages/ModelConfig';
 import { Prevent } from './pages/Prevent';
 import { Records } from './pages/Records';
@@ -67,6 +68,8 @@ export function App() {
   else if (r === '/cases') page = <Knowledge initialTab="case" />;
   else if (r === '/records') page = <Records onOpenRecord={() => navigate('/')} />;
   else if (r === '/hazard-test') page = <HazardTest />;
+  // 偏差数据库必须先于通用 /clustering 分支匹配
+  else if (r.startsWith('/clustering/knowledge-base')) page = <KnowledgeBase />;
   else if (r.startsWith('/clustering/test')) page = <ClusteringTest />;
   else if (r.startsWith('/clustering')) page = <ClusteringOverview />;
   else if (r === '/tokens') page = <TokenUsagePage />;

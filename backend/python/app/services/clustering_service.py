@@ -44,6 +44,7 @@ from app.core.logger import get_logger
 from app.processors.tabular_reader import read_records
 from app.processors.text_cleaner import clean_hazard_text
 from app.services.cluster_digest import build_digest
+from app.services.cluster_evaluation import compare_metrics, evaluate_metrics, extract_ground_truth
 from app.utils.helpers import truncate
 from app.utils.validators import validate_item_count
 
@@ -197,6 +198,16 @@ class ClusteringGatewayService:
         if self._engine is None:
             raise EngineUnavailableError(self._engine_error or "聚类引擎不可用。")
         return self._engine
+
+    def require_engine(self) -> Any:
+        """公开的引擎获取入口。
+
+        「偏差数据库」服务需要复用同一份引擎实例（同一份编码器缓存、同一份
+        Qwen 净化器），否则会各加载一次 1.3GB 向量模型，甚至在 GPU 上并存两份
+        Qwen。这里把原来的私有方法显式开放出来，避免跨模块访问下划线成员。
+        """
+
+        return self._require_engine()
 
     def run_slot(self):
         """占用"同一时刻只跑一个聚类"的执行槽位，返回上下文管理器。
@@ -533,39 +544,96 @@ class ClusteringGatewayService:
 
     # ------------------------------------------------------------------ 执行聚类
 
-    def _resolve_profile(self, options: dict[str, Any]) -> Any:
-        """决定本次请求使用哪个 profile。
+    def _apply_knowledge_base(self, profile: Any, knowledge_base_id: str | None) -> tuple[Any, str | None]:
+        """把请求级知识库覆盖应用到 profile（「偏差数据库」选择器）。
+
+        复用引擎的 `with_knowledge_base`，保证"网关本地复现特征用的 profile"与
+        "引擎执行用的 profile"是同一份——否则 legacy 路径会标签按新库算、
+        散点按旧库画。
+
+        返回 `(profile, 提示)`：当知识库条目数少于 profile 的近邻数 ``k`` 时，
+        引擎会把 ``k`` 下调为条目数；这属于"确实改变了本次检索口径"，必须作为
+        告警回传给界面，而不是悄悄发生。
+        """
+
+        if not knowledge_base_id:
+            return profile, None
+        try:
+            overridden = self._require_engine().with_knowledge_base(profile, knowledge_base_id)
+        except Exception as exc:  # noqa: BLE001 - 非法覆盖（如非检索 profile）转成网关错误
+            raise _from_engine_error(exc) from exc
+        note = None
+        if overridden.features.n_results < profile.features.n_results:
+            note = (
+                f"知识库「{knowledge_base_id}」只有 {overridden.features.n_results} 条，"
+                f"少于 profile 声明的近邻数 k={profile.features.n_results}；"
+                f"本次已自动将 k 下调为 {overridden.features.n_results}。"
+            )
+        return overridden, note
+
+    @staticmethod
+    def _knowledge_base_request_field(profile: Any) -> dict[str, Any]:
+        """引擎请求里显式带上 profile 生效的知识库。
+
+        引擎按 `profile_id` 重新解析配置，若不带上这个字段，它会用清单里的默认
+        知识库，忽略请求级覆盖——于是"网关本地 profile"与"引擎实际执行的 profile"
+        分叉。只在检索增强 profile 上带，纯向量 profile 带了会被引擎拒绝。
+        """
+
+        if profile.features.n_results and profile.knowledge_base_id:
+            return {"knowledge_base_id": profile.knowledge_base_id}
+        return {}
+
+    def _resolve_profile(self, options: dict[str, Any]) -> tuple[Any, list[str]]:
+        """决定本次请求使用哪个 profile，并回传因知识库覆盖产生的告警。
 
         优先级：显式 `profile_id` > 指定 `algorithm` 的可用 profile > 配置的
         `default_profile_id` > 自动挑选（纯向量 profile 优先）。
         """
 
+        warnings: list[str] = []
         catalog = self._catalog
+        knowledge_base_id = options.get("knowledge_base_id")
         profile_id = options.get("profile_id") or self.settings.default_profile_id
         if profile_id:
             try:
                 profile = catalog.profile(profile_id)
             except Exception as exc:  # noqa: BLE001
                 raise _from_engine_error(exc) from exc
+            # 先应用知识库覆盖，再按覆盖后的知识库校验可用性：
+            # 否则"默认库缺失、但用户另选了一个可用库"会被错误地判为不可执行。
+            profile, note = self._apply_knowledge_base(profile, knowledge_base_id)
+            if note:
+                warnings.append(note)
             available, reason = self._profile_status(profile)
             if not available:
                 raise ProfileUnavailableError(
                     f"profile「{profile_id}」当前不可执行（{reason}）。"
                     "若是检索增强 profile，请先构建对应知识库。"
                 )
-            return profile
+            return profile, warnings
 
         profiles = self.list_profiles()
         algorithms = [options["algorithm"]] if options.get("algorithm") else []
 
         def matches(profile: dict[str, Any]) -> bool:
-            return not algorithms or profile["algorithm"] in algorithms
+            if algorithms and profile["algorithm"] not in algorithms:
+                return False
+            # 指定了知识库时只考虑检索增强 profile：把知识库传给纯向量 profile
+            # 会被引擎拒绝，自动挑选必须提前避开，而不是挑完再报 422。
+            if knowledge_base_id and not int(profile["features"].get("n_results", 0) or 0):
+                return False
+            return True
 
         candidates = [profile for profile in profiles if profile["available"] and matches(profile)]
         if not candidates and algorithms:
             raise ProfileUnavailableError(
                 f"算法「{algorithms[0]}」当前没有可用的 profile。"
                 f"可用算法：{', '.join(sorted({p['algorithm'] for p in profiles if p['available']}))}"
+            )
+        if not candidates and knowledge_base_id:
+            raise ProfileUnavailableError(
+                "没有可用的检索增强 profile 来使用所选知识库；请显式选择一个检索增强 profile。"
             )
         if not candidates:
             raise ProfileUnavailableError("当前没有可用的 profile，请检查引擎配置与模型文件。")
@@ -578,7 +646,10 @@ class ClusteringGatewayService:
             return (profile["features"].get("n_results", 0), preferred, profile["profile_id"])
 
         selected = sorted(candidates, key=rank)[0]
-        return catalog.profile(selected["profile_id"])
+        profile, note = self._apply_knowledge_base(catalog.profile(selected["profile_id"]), knowledge_base_id)
+        if note:
+            warnings.append(note)
+        return profile, warnings
 
     def run(self, payload: dict[str, Any]) -> dict[str, Any]:
         """执行一次聚类，返回加工后的结果。
@@ -615,7 +686,7 @@ class ClusteringGatewayService:
         from retrain_cluster.services.strategies import LEGACY_VERSION, SEMANTIC_VERSION, SPEAR_VERSION
 
         engine = self._require_engine()
-        profile = self._resolve_profile(options)
+        profile, kb_warnings = self._resolve_profile(options)
         implementation = getattr(profile, "implementation_version", LEGACY_VERSION)
 
         # 引擎在真正执行前先校验超参：参数不合法立刻返回 422 语义，不做无谓计算。
@@ -625,7 +696,7 @@ class ClusteringGatewayService:
             raise _from_engine_error(exc) from exc
 
         if implementation == SEMANTIC_VERSION:
-            return self._run_semantic(
+            result = self._run_semantic(
                 engine=engine,
                 profile=profile,
                 sample_ids=sample_ids,
@@ -633,12 +704,23 @@ class ClusteringGatewayService:
                 metadata=metadata,
                 started=started,
             )
-
-        if implementation == SPEAR_VERSION:
+        elif implementation == SPEAR_VERSION:
             # SPEAR 的净化发生在引擎内部：网关只负责把"开/关净化"这一意图
             # 原样透传，并把引擎返回的净化报告挂到契约上，不重新实现净化。
             validate_item_count(len(raw_items), minimum=MIN_ITEMS)
-            return self._run_spear(
+            result = self._run_spear(
+                engine=engine,
+                profile=profile,
+                sample_ids=sample_ids,
+                texts=texts,
+                metadata=metadata,
+                options=options,
+                started=started,
+            )
+        else:
+            # legacy-v1：仍然是「至少 2 条」；语义路径的放宽不外溢到这里。
+            validate_item_count(len(raw_items), minimum=MIN_ITEMS)
+            result = self._run_legacy(
                 engine=engine,
                 profile=profile,
                 sample_ids=sample_ids,
@@ -648,17 +730,98 @@ class ClusteringGatewayService:
                 started=started,
             )
 
-        # legacy-v1：仍然是「至少 2 条」；语义路径的放宽不外溢到这里。
-        validate_item_count(len(raw_items), minimum=MIN_ITEMS)
-        return self._run_legacy(
+        # 知识库覆盖带来的口径变化（如 k 被下调）必须出现在结果告警里，不能只在日志
+        if kb_warnings:
+            result.setdefault("summary", {}).setdefault("warnings", []).extend(kb_warnings)
+
+        self._attach_evaluation(
+            result=result,
             engine=engine,
             profile=profile,
             sample_ids=sample_ids,
             texts=texts,
             metadata=metadata,
             options=options,
-            started=started,
+            implementation=implementation,
         )
+        return result
+
+    # ------------------------------------------------------------------ 指标评估
+
+    def _attach_evaluation(
+        self,
+        *,
+        result: dict[str, Any],
+        engine: Any,
+        profile: Any,
+        sample_ids: list[str],
+        texts: list[str],
+        metadata: list[dict[str, Any]],
+        options: dict[str, Any],
+        implementation: str,
+    ) -> None:
+        """把 6 项外部指标（以及可选的「未净化对照」）挂到 summary 上。
+
+        真值来自数据集自带的标签列（如 ``category``）；**每条样本都带标签才算**，
+        否则只给告警、不猜——用不完整标注算出来的 ARI 比没有 ARI 更危险。
+
+        ``controlPurify=true`` 时额外跑一遍「净化关」作为对照，并与主运行做差值，
+        这正是论文里 nr0 与完整框架（nr-1）的对比口径。对照只在 spear-v1 上成立：
+        其它 profile 本来就没有净化步骤。
+        """
+
+        from retrain_cluster.services.strategies import SPEAR_VERSION
+
+        summary = result.setdefault("summary", {})
+        warnings = summary.setdefault("warnings", [])
+        truth, field = extract_ground_truth(metadata)
+        wants_control = bool(options.get("control_purify"))
+
+        if truth is None:
+            if wants_control:
+                # 勾了对照却没有真值：如实说明，而不是给出一个静默的空结果
+                warnings.append("CONTROL_METRICS_NO_GROUND_TRUTH")
+            return
+
+        predicted = [int(item["cluster_id"]) for item in result.get("items") or []]
+        try:
+            metrics = evaluate_metrics(truth, predicted)
+        except Exception as exc:  # noqa: BLE001 - 指标是附加信息，失败不应让聚类整体失败
+            logger.warning("外部指标计算失败：%s", exc)
+            warnings.append("METRICS_COMPUTATION_FAILED")
+            return
+        summary["metrics"] = metrics
+        summary["ground_truth"] = {"field": field, "labeled": len(truth), "total": len(metadata)}
+        if metrics.get("score") == -1.0:
+            warnings.append("METRICS_UNAVAILABLE_SINGLE_CLUSTER")
+
+        if not wants_control:
+            return
+        if implementation != SPEAR_VERSION:
+            # 没有净化能力的 profile 不存在"未净化对照"；不能假装跑过
+            warnings.append("CONTROL_RUN_SKIPPED_UNSUPPORTED_PROFILE")
+            return
+
+        control = self._run_spear(
+            engine=engine,
+            profile=profile,
+            sample_ids=sample_ids,
+            texts=texts,
+            metadata=metadata,
+            # 对照固定为"净化关"：与请求级 purify 覆盖走同一条语义，不新增口径
+            options={**options, "purify": False},
+            started=time.monotonic(),
+        )
+        control_predicted = [int(item["cluster_id"]) for item in control.get("items") or []]
+        try:
+            control_metrics = evaluate_metrics(truth, control_predicted)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("对照运行指标计算失败：%s", exc)
+            warnings.append("CONTROL_METRICS_COMPUTATION_FAILED")
+            return
+        summary["control_metrics"] = control_metrics
+        # 方向与离线基准一致：base=净化关（nr0 口径），target=本次主运行（净化开）
+        summary["metrics_comparison"] = compare_metrics(control_metrics, metrics)
 
     # ------------------------------------------------------------------ legacy 分支
 
@@ -700,6 +863,7 @@ class ClusteringGatewayService:
                 "profile_id": profile.profile_id,
                 "items": [{"id": ident, "text": text} for ident, text in zip(sample_ids, texts)],
             }
+            engine_request.update(self._knowledge_base_request_field(profile))
             try:
                 result = engine.cluster(engine_request, enforce_api_limits=True)
             except Exception as exc:  # noqa: BLE001
@@ -944,6 +1108,8 @@ class ClusteringGatewayService:
             override = options.get("purify")
             if override is not None:
                 engine_request["purification"] = {"enabled": bool(override)}
+            # 请求级知识库覆盖：SPEAR 检索增强 profile 允许改用偏差数据库
+            engine_request.update(self._knowledge_base_request_field(profile))
             try:
                 result = engine.cluster(engine_request, enforce_api_limits=True)
             except Exception as exc:  # noqa: BLE001

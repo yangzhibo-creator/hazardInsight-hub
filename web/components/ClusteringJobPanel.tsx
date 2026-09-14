@@ -25,7 +25,7 @@ import type {
 import { fetchClusteringJobFilters, fetchClusteringJobItems } from '../api/clustering';
 import { IconPlay, IconRefresh } from './icons';
 import { clusterColor } from '../lib/clusterColor';
-import { useClusteringJob } from '../lib/useClusteringJob';
+import type { ClusteringJobApi } from '../lib/useClusteringJob';
 
 /** 每页条数。后端还有 500 的硬上限，这里取一个对表格友好的值。 */
 const PAGE_SIZE = 50;
@@ -56,6 +56,14 @@ export function describeJobStatus(job: ClusteringJobInfo | null): string {
 }
 
 interface Props {
+  /**
+   * 作业状态机（由页面持有）。
+   *
+   * 之所以从外面传进来：提交按钮要和「开始聚类」并排放在同一行运行选项里，
+   * 而不是藏在页面下方的面板里——选项在哪，提交就在哪，不该让人满页找。
+   * 面板只负责"作业跑起来之后"的进度、取消与分页明细。
+   */
+  api: ClusteringJobApi;
   /** 当前数据集的样本。样本多时只提交 `datasetId`，不重传整份列表。 */
   items: ClusteringDatasetItem[];
   /** 已上传数据集返回的引用 ID；有它就不必把样本再传一遍。 */
@@ -63,10 +71,28 @@ interface Props {
   options: ClusteringJobSubmitOptions;
   /** 引擎未就绪或正在上传数据时禁用提交。 */
   disabled?: boolean;
+  /**
+   * 是否在面板内渲染「提交后台作业」按钮。
+   * 页面把提交按钮放进运行选项行时传 false；此时没有作业可展示的面板自行隐藏。
+   */
+  showSubmit?: boolean;
+  /**
+   * 本次作业的参考数据库（可读名称）。
+   * 与聚类选项同一份来源：作业提交后在服务端跑的就是这个库，
+   * 面板必须把它写出来，否则几十分钟后没人记得这份结果是哪个库算的。
+   */
+  knowledgeBaseLabel?: string;
 }
 
-export function ClusteringJobPanel({ items, datasetId, options, disabled = false }: Props) {
-  const jobApi = useClusteringJob();
+export function ClusteringJobPanel({
+  api: jobApi,
+  items,
+  datasetId,
+  options,
+  disabled = false,
+  showSubmit = true,
+  knowledgeBaseLabel = '',
+}: Props) {
   const { job, result, error } = jobApi;
 
   const [clusterFilter, setClusterFilter] = useState<number | null>(null);
@@ -143,6 +169,12 @@ export function ClusteringJobPanel({ items, datasetId, options, disabled = false
   const currentPage = Math.min(page, pageCount - 1);
   const visibleItems: ClusteringResultItem[] = useMemo(() => pageData?.items ?? [], [pageData]);
 
+  /**
+   * 提交按钮在页面运行选项行里时，面板只在"有作业可看"或"提交失败要报错"时出现。
+   * 否则页面下方会长期挂着一张空卡片，把真正的结果推得更远。
+   */
+  if (!showSubmit && !job && !error) return null;
+
   return (
     <section className="card card-pad clustering-job-panel" aria-label="异步聚类作业">
       <div className="clustering-toolbar">
@@ -150,13 +182,15 @@ export function ClusteringJobPanel({ items, datasetId, options, disabled = false
           <strong>后台作业（大数据量推荐）</strong>
           <div className="small muted">{describeJobStatus(job)}</div>
         </div>
-        <button
-          className="btn btn-primary"
-          disabled={disabled || items.length === 0 || isCancellable(job)}
-          onClick={start}
-        >
-          <IconPlay size={15} />提交后台作业
-        </button>
+        {showSubmit && (
+          <button
+            className="btn btn-primary"
+            disabled={disabled || items.length === 0 || isCancellable(job)}
+            onClick={start}
+          >
+            <IconPlay size={15} />提交后台作业
+          </button>
+        )}
         {isCancellable(job) && (
           <button className="btn btn-outline" onClick={() => void jobApi.cancel()}>
             取消作业
@@ -170,9 +204,14 @@ export function ClusteringJobPanel({ items, datasetId, options, disabled = false
       </div>
 
       <p className="small muted">
-        样本量大时优先用它：提交后立刻返回作业 ID，可以随时取消（后端会终止执行进程并释放资源），
-        明细按页读取，不需要把整份结果下载到浏览器。
+        提交后立刻返回作业 ID，可以随时取消（后端会终止执行进程并释放资源），
+        明细按页读取，不需要把整份结果下载到浏览器。算法 / profile / 净化 / 参考数据库沿用上方运行选项。
       </p>
+      {knowledgeBaseLabel && (
+        <p className="small muted">
+          参考数据库：<strong>{knowledgeBaseLabel}</strong>
+        </p>
+      )}
 
       {error && <p className="clustering-notice is-error">{error}</p>}
       {job?.error && <p className="clustering-notice is-error">{job.error.message}</p>}

@@ -127,17 +127,25 @@ def test_purify_override_is_forwarded_verbatim(service):
 
 
 def test_profile_listing_reports_purification_degradation(service):
+    from retrain_cluster.purification import probe
+
     profiles = {profile["profile_id"]: profile for profile in service.list_profiles(refresh=True)}
     for profile_id in (SPEAR_PROFILE_ID, SPEAR_RETRIEVAL_PROFILE_ID):
         profile = profiles[profile_id]
+        spec = service._catalog.profile(profile_id).purification
         assert profile["purification"] is not None
-        # 本机没有 55 GB 权重：必须如实报告降级，而不是假装净化可用
-        assert profile["purification"]["degraded"] is True
-        assert profile["purification"]["effective_backend"] == "rule"
-        assert "PURIFIER_DEGRADED_TO_RULE" in profile["warnings"]
+        # 期望值由无副作用的 probe 给出，而不是写死：本机可能装了 Qwen 权重
+        # （→ qwen）或预计算映射（→ cache），写死其中一种会把正确行为判成失败。
+        expected = probe(spec)
+        payload = profile["purification"]
+        assert payload["degraded"] is expected.degraded
+        assert payload["effective_backend"] == expected.effective_backend
+        assert payload["requested_backend"] == expected.requested_backend
+        if expected.degraded:
+            assert "PURIFIER_DEGRADED_TO_RULE" in profile["warnings"]
         assert profile["capability"]["purification"] is True
         # 对外载荷不含宿主机路径
-        assert "model_path" not in profile["purification"]
+        assert "model_path" not in payload
 
     # legacy profile 没有净化口径
     assert profiles["bge-large-agglomerative-nr0-legacy-v1"]["purification"] is None
